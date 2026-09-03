@@ -1,0 +1,21 @@
+:root {
+  /* Sleek Interface Design System Tokens */
+  --navy: #0C1220;
+  --navy2: #131929;
+  --navy3: #1A2235;
+  --gold: #C8A84B;
+  --gold2: #E2C46A;
+  --blue: #4A9EFF;
+  --cream: #F7F4EE;
+  --paper: #FAFAF7;
+  --line: #E2DDD5;
+  --f-serif: 'Playfair Display', Georgia, serif;
+  --f-sans: 'Inter', 'Helvetica Neue', Arial, sans-serif;
+
+  /* Extended UI Dimensions */
+  --sidebar-width: 220px;
+  --property-panel-width: 260px;
+  --top-nav-height: 60px;
+  --playback-bar-height: 60px;
+}
+

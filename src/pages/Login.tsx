@@ -1,195 +1,206 @@
-import { useState } from 'react'
-import { Link } from 'react-router-dom'
-import StaffSVG from '../components/StaffSVG'
+import React, { useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 
-export default function Login() {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [showPw, setShowPw] = useState(false)
-  const [remember, setRemember] = useState(false)
+export const Login: React.FC = () => {
+  const navigate = useNavigate();
+  const [email, setEmail] = useState('mozart@archivio-salzburg.at');
+  const [password, setPassword] = useState('••••••••••••');
+  const [rememberMe, setRememberMe] = useState(true);
+  const [showPassword, setShowPassword] = useState(false);
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    // placeholder — no backend yet
-    alert(`Login: ${email}`)
-  }
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    navigate('/dashboard');
+  };
 
   return (
-    <div style={{ minHeight: '100vh', display: 'grid', gridTemplateColumns: '1fr 1fr' }}>
-      {/* COLUMNA IZQUIERDA */}
-      <div style={{
-        background: '#0C1220', display: 'flex', flexDirection: 'column',
-        justifyContent: 'space-between', padding: '48px 40px',
-        borderRight: '1px solid #C8A84B22',
-      }}
-        className="login-left"
-      >
-        <div>
-          <h1 style={{ fontFamily: '"Playfair Display", serif', color: '#C8A84B', fontSize: 32, fontWeight: 700, margin: '0 0 8px' }}>
+    <div className="bg-[#0C1220] text-[#e5e2dc] min-h-screen flex font-sans selection:bg-[#C8A84B]/20 selection:text-[#E2C46A] overflow-hidden">
+
+      {/* LEFT HALF — Hero / Brand */}
+      <div className="hidden lg:flex w-1/2 relative flex-col items-center justify-center p-12 bg-[#080b14] border-r border-[#1A2235] overflow-hidden">
+        {/* Background glow */}
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-[#C8A84B]/8 rounded-full blur-[80px] pointer-events-none" />
+
+        {/* Musical staff decorative SVG */}
+        <svg className="absolute inset-0 w-full h-full opacity-[0.04]" viewBox="0 0 400 600" xmlns="http://www.w3.org/2000/svg">
+          {[100, 130, 160, 190, 220, 320, 350, 380, 410, 440].map((y, i) => (
+            <line key={i} x1="0" x2="400" y1={y} y2={y} stroke="#C8A84B" strokeWidth="1" />
+          ))}
+          <text x="20" y="200" fontSize="120" fill="#C8A84B" fontFamily="serif">𝄞</text>
+          <text x="20" y="430" fontSize="120" fill="#C8A84B" fontFamily="serif">𝄢</text>
+        </svg>
+
+        <div className="relative z-10 flex flex-col items-center text-center max-w-sm">
+          {/* Logo */}
+          <div className="w-16 h-16 rounded-2xl bg-[#C8A84B] text-[#0C1220] flex items-center justify-center font-bold text-4xl shadow-xl mb-6 select-none">
+            𝄞
+          </div>
+
+          <h1 className="font-serif text-4xl font-bold text-[#C8A84B] tracking-tight">
             ProPartituras
           </h1>
-          <p style={{ color: '#8898aa', fontSize: 13, margin: '0 0 40px' }}>NSM Standard</p>
-
-          <h2 style={{ fontFamily: '"Playfair Display", serif', color: '#e8dfc8', fontSize: 26, margin: '0 0 16px', lineHeight: 1.3 }}>
-            Tu música, en cualquier lugar
-          </h2>
-          <p style={{ color: '#8898aa', fontSize: 15, lineHeight: 1.7, margin: '0 0 40px', maxWidth: 360 }}>
-            Crea, edita y exporta partituras profesionales desde el navegador. Estándar NSM, exportación MusicXML y audio en tiempo real.
+          <p className="text-xs uppercase tracking-[3px] text-[#909096] font-semibold mt-2 mb-8">
+            Estudio de Grabado Urtext
           </p>
 
-          {/* Staff decorativo semitransparente */}
-          <div style={{ opacity: 0.4 }}>
-            <StaffSVG theme="dark" />
-          </div>
-        </div>
+          <blockquote className="font-serif text-lg italic text-[#e5e2dc]/80 leading-relaxed border-l-2 border-[#C8A84B]/50 pl-4 text-left">
+            "La música no está en las notas, sino en el silencio entre ellas."
+          </blockquote>
+          <p className="mt-3 text-xs text-[#909096]">— Wolfgang Amadeus Mozart</p>
 
-        <footer style={{ color: '#445', fontSize: 12 }}>
-          © 2026 ProPartituras · NSM Standard
-        </footer>
-      </div>
-
-      {/* COLUMNA DERECHA */}
-      <div style={{
-        background: '#FAFAF7', display: 'flex', flexDirection: 'column',
-        justifyContent: 'center', padding: '48px 40px',
-      }}
-        className="login-right"
-      >
-        <div style={{ maxWidth: 380, width: '100%', margin: '0 auto' }}>
-          <h2 style={{ fontFamily: '"Playfair Display", serif', color: '#0C1220', fontSize: 26, margin: '0 0 8px' }}>
-            Ingresar a tu cuenta
-          </h2>
-          <p style={{ color: '#667', fontSize: 14, margin: '0 0 32px' }}>
-            ¿No tienes cuenta?{' '}
-            <Link to="/register" style={{ color: '#4A9EFF', textDecoration: 'none', fontWeight: 500 }}>
-              Crear una gratis
-            </Link>
-          </p>
-
-          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            {/* Email */}
-            <div>
-              <label style={{ display: 'block', fontSize: 13, color: '#445', fontWeight: 500, marginBottom: 6 }}>
-                Correo electrónico
-              </label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="usuario@correo.cl"
-                required
-                style={inputStyle}
-              />
-            </div>
-
-            {/* Password */}
-            <div>
-              <label style={{ display: 'block', fontSize: 13, color: '#445', fontWeight: 500, marginBottom: 6 }}>
-                Contraseña
-              </label>
-              <div style={{ position: 'relative' }}>
-                <input
-                  type={showPw ? 'text' : 'password'}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  required
-                  style={{ ...inputStyle, paddingRight: 44 }}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPw(!showPw)}
-                  style={{
-                    position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
-                    background: 'none', border: 'none', cursor: 'pointer', color: '#889', fontSize: 16, padding: 0,
-                  }}
-                >
-                  {showPw ? '🙈' : '👁'}
-                </button>
+          <div className="mt-12 grid grid-cols-3 gap-6 text-center">
+            {[
+              { value: '88', label: 'Notas MIDI' },
+              { value: 'NSM', label: 'Estándar Urtext' },
+              { value: '4K', label: 'Exportación DPI' },
+            ].map((stat) => (
+              <div key={stat.label}>
+                <div className="font-serif text-2xl font-bold text-[#C8A84B]">{stat.value}</div>
+                <div className="text-[10px] text-[#909096] uppercase tracking-wider mt-1">{stat.label}</div>
               </div>
-            </div>
-
-            {/* Remember */}
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#445', cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={remember}
-                onChange={(e) => setRemember(e.target.checked)}
-                style={{ accentColor: '#0C1220', width: 15, height: 15 }}
-              />
-              Mantener sesión activa
-            </label>
-
-            {/* Submit */}
-            <button
-              type="submit"
-              style={{
-                background: '#0C1220', color: '#C8A84B', border: 'none',
-                borderRadius: 8, padding: '13px', fontSize: 15, fontWeight: 600,
-                cursor: 'pointer', width: '100%', marginTop: 4,
-              }}
-            >
-              Ingresar
-            </button>
-          </form>
-
-          {/* Divider */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '24px 0' }}>
-            <div style={{ flex: 1, height: 1, background: '#ddd' }} />
-            <span style={{ color: '#aaa', fontSize: 13 }}>o continúa con</span>
-            <div style={{ flex: 1, height: 1, background: '#ddd' }} />
-          </div>
-
-          {/* OAuth buttons */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <button style={oauthBtnStyle}>
-              <GoogleSVG />
-              Continuar con Google
-            </button>
-            <button style={{ ...oauthBtnStyle, background: '#0C1220', color: '#C8A84B', borderColor: '#0C1220' }}>
-              🎓 EduID / Conservatorio
-            </button>
-          </div>
-
-          <div style={{ textAlign: 'center', marginTop: 24 }}>
-            <Link to="/forgot-password" style={{ color: '#889', fontSize: 13, textDecoration: 'none' }}>
-              ¿Olvidaste tu contraseña?
-            </Link>
+            ))}
           </div>
         </div>
       </div>
 
-      <style>{`
-        @media (max-width: 767px) {
-          .login-left { display: none !important; }
-          div[style*="gridTemplateColumns"] {
-            grid-template-columns: 1fr !important;
-          }
-        }
-      `}</style>
+      {/* RIGHT HALF — Login Form */}
+      <div className="w-full lg:w-1/2 flex flex-col items-center justify-center p-6 sm:p-12 relative overflow-y-auto">
+        <div className="absolute top-6 left-6 lg:hidden">
+          <Link to="/" className="font-serif text-2xl text-[#C8A84B] hover:text-[#E2C46A] transition-colors">
+            ProPartituras
+          </Link>
+        </div>
+
+        <div className="w-full max-w-[420px] flex flex-col gap-6 mt-16 lg:mt-0">
+          {/* Heading */}
+          <div className="text-center lg:text-left">
+            <h2 className="font-serif text-3xl text-[#e5e2dc] font-bold">Acceso al Taller</h2>
+            <p className="text-xs text-[#c6c6cc] mt-2">
+              Introduce tus credenciales de compositor o archivista
+            </p>
+          </div>
+
+          {/* Form Card */}
+          <div className="bg-[#131929] rounded-xl p-8 shadow-2xl border border-white/5 flex flex-col gap-5">
+            <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+              {/* Email */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[11px] font-semibold text-[#909096] uppercase tracking-wider">
+                  Correo Electrónico
+                </label>
+                <div className="relative flex items-center">
+                  <span className="material-symbols-outlined absolute left-3 text-[18px] text-[#909096]">mail</span>
+                  <input
+                    type="email"
+                    required
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="compositor@urtext.org"
+                    className="w-full pl-10 pr-3 py-2.5 rounded bg-[#20201c] border border-white/5 text-[#e5e2dc] text-xs focus:border-[#4A9EFF] focus:outline-none transition-colors"
+                  />
+                </div>
+              </div>
+
+              {/* Password */}
+              <div className="flex flex-col gap-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-semibold text-[#909096] uppercase tracking-wider">
+                    Contraseña
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => alert('Se ha enviado un enlace de recuperación a tu correo institucional.')}
+                    className="text-[11px] text-[#C8A84B] hover:underline"
+                  >
+                    ¿Olvidaste tu contraseña?
+                  </button>
+                </div>
+                <div className="relative flex items-center">
+                  <span className="material-symbols-outlined absolute left-3 text-[18px] text-[#909096]">lock</span>
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••••••"
+                    className="w-full pl-10 pr-10 py-2.5 rounded bg-[#20201c] border border-white/5 text-[#e5e2dc] text-xs focus:border-[#4A9EFF] focus:outline-none transition-colors"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="material-symbols-outlined absolute right-3 text-[18px] text-[#909096] hover:text-[#e5e2dc]"
+                  >
+                    {showPassword ? 'visibility_off' : 'visibility'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Remember */}
+              <div className="flex items-center gap-2 pt-1">
+                <input
+                  type="checkbox"
+                  id="remember"
+                  checked={rememberMe}
+                  onChange={(e) => setRememberMe(e.target.checked)}
+                  className="rounded border-white/10 bg-[#20201c] text-[#C8A84B] focus:ring-0 cursor-pointer"
+                />
+                <label htmlFor="remember" className="text-xs text-[#c6c6cc] cursor-pointer">
+                  Mantener sesión activa en este puesto de trabajo
+                </label>
+              </div>
+
+              <button
+                type="submit"
+                className="mt-2 w-full py-2.5 rounded bg-[#C8A84B] text-[#0C1220] font-semibold text-xs hover:bg-[#E2C46A] shadow-md transition-all active:scale-[0.98] flex items-center justify-center gap-2"
+              >
+                <span className="material-symbols-outlined text-[18px]">key</span>
+                <span>Entrar al Atelier</span>
+              </button>
+            </form>
+
+            {/* Divider */}
+            <div className="relative flex items-center justify-center">
+              <div className="w-full border-t border-white/5"></div>
+              <span className="absolute bg-[#131929] px-3 text-[10px] text-[#909096] uppercase tracking-wider font-semibold">
+                O continúa mediante llave de archivo
+              </span>
+            </div>
+
+            {/* SSO */}
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => navigate('/dashboard')}
+                className="py-2 px-3 rounded bg-[#212D44] hover:bg-[#1A2235] text-[#e5e2dc] text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-white/5"
+              >
+                <span className="text-[14px]">🌐</span>
+                <span>Google Workspace</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate('/dashboard')}
+                className="py-2 px-3 rounded bg-[#212D44] hover:bg-[#1A2235] text-[#e5e2dc] text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-white/5"
+              >
+                <span className="material-symbols-outlined text-[16px] text-[#C8A84B]">school</span>
+                <span>EduID / Conservatorio</span>
+              </button>
+            </div>
+
+            <div className="pt-2 border-t border-white/5 text-center text-xs text-[#c6c6cc]">
+              ¿Aún no tienes licencia institucional?{' '}
+              <Link to="/editor" className="text-[#C8A84B] font-semibold hover:underline">
+                Solicitar cátedra de prueba
+              </Link>
+            </div>
+          </div>
+
+          {/* TLS badge */}
+          <div className="flex items-center justify-center gap-2 text-[10px] text-[#909096]">
+            <span className="material-symbols-outlined text-[14px] text-[#2ECC71]">verified_user</span>
+            <span>Conexión encriptada TLS 1.3 • Clave criptográfica de partitura verificada</span>
+          </div>
+        </div>
+      </div>
     </div>
-  )
-}
-
-const inputStyle: React.CSSProperties = {
-  width: '100%', padding: '11px 14px', fontSize: 14,
-  border: '1px solid #ccc', borderRadius: 8, background: '#fff',
-  color: '#1a1a1a', outline: 'none', boxSizing: 'border-box',
-}
-
-const oauthBtnStyle: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
-  padding: '11px', border: '1px solid #ddd', borderRadius: 8,
-  background: '#fff', color: '#333', cursor: 'pointer', fontSize: 14, fontWeight: 500, width: '100%',
-}
-
-function GoogleSVG() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden>
-      <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
-      <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
-      <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
-      <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
-    </svg>
-  )
-}
+  );
+};
