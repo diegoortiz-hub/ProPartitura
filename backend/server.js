@@ -14,26 +14,29 @@ app.use(cors());
 
 const upload = multer({ dest: os.tmpdir() });
 
-// Audiveris puede invocarse como JAR (legacy) o como app instalada (v5.x)
-const AUDIVERIS_JAR  = process.env.AUDIVERIS_JAR  || path.join(__dirname, 'Audiveris.jar');
-const AUDIVERIS_HOME = process.env.AUDIVERIS_HOME || path.join(__dirname, 'audiveris');
-const AUDIVERIS_BAT  = path.join(AUDIVERIS_HOME, 'bin', 'Audiveris.bat');
-const JAVA_BIN       = process.env.JAVA_BIN       || 'java';
-const PORT           = process.env.PORT            || 3001;
+const PORT = process.env.PORT || 3001;
 
-// Elige el modo de invocación disponible
-function getAudiverisCmd(tmpDir, imgPath) {
-  if (fs.existsSync(AUDIVERIS_BAT)) {
-    return `"${AUDIVERIS_BAT}" -batch -export -output "${tmpDir}" "${imgPath}"`;
-  }
-  if (fs.existsSync(AUDIVERIS_JAR)) {
-    return `"${JAVA_BIN}" -jar "${AUDIVERIS_JAR}" -batch -export -output "${tmpDir}" "${imgPath}"`;
-  }
-  return null;
+// Posibles rutas de Audiveris (en orden de preferencia)
+const AUDIVERIS_CANDIDATES = [
+  process.env.AUDIVERIS_EXE,
+  path.join(__dirname, 'audiveris', 'Audiveris', 'Audiveris.exe'),
+  path.join(__dirname, 'audiveris', 'bin', 'Audiveris.bat'),
+  path.join(__dirname, 'Audiveris.jar'),
+].filter(Boolean);
+
+function findAudiveris() {
+  return AUDIVERIS_CANDIDATES.find(p => fs.existsSync(p)) || null;
 }
 
-function audiverisAvailable() {
-  return fs.existsSync(AUDIVERIS_BAT) || fs.existsSync(AUDIVERIS_JAR);
+function getAudiverisCmd(tmpDir, imgPath) {
+  const bin = findAudiveris();
+  if (!bin) return null;
+  if (bin.endsWith('.exe') || bin.endsWith('.bat')) {
+    return `"${bin}" -batch -export -output "${tmpDir}" "${imgPath}"`;
+  }
+  // JAR legacy
+  const java = process.env.JAVA_BIN || 'java';
+  return `"${java}" -jar "${bin}" -batch -export -output "${tmpDir}" "${imgPath}"`;
 }
 
 // step name → semitone offset within octave
@@ -124,20 +127,12 @@ app.post('/api/omr', upload.single('file'), (req, res) => {
 });
 
 app.get('/api/health', (_req, res) => {
-  const batFound = fs.existsSync(AUDIVERIS_BAT);
-  const jarFound = fs.existsSync(AUDIVERIS_JAR);
-  res.json({
-    status: 'ok',
-    audiverisFound: batFound || jarFound,
-    mode: batFound ? 'app' : jarFound ? 'jar' : 'none',
-    audiverisBat: AUDIVERIS_BAT,
-    audiverisJar: AUDIVERIS_JAR,
-  });
+  const bin = findAudiveris();
+  res.json({ status: 'ok', audiverisFound: !!bin, audiverisBin: bin || 'none' });
 });
 
 app.listen(PORT, () => {
+  const bin = findAudiveris();
   console.log(`OMR server en http://localhost:${PORT}`);
-  if (fs.existsSync(AUDIVERIS_BAT))  console.log(`Audiveris app: ${AUDIVERIS_BAT} ✓`);
-  else if (fs.existsSync(AUDIVERIS_JAR)) console.log(`Audiveris JAR: ${AUDIVERIS_JAR} ✓`);
-  else console.log('Audiveris: NO encontrado. Descarga desde https://github.com/Audiveris/audiveris/releases');
+  console.log(bin ? `Audiveris: ${bin} ✓` : 'Audiveris: NO encontrado');
 });
