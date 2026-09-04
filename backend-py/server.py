@@ -1,15 +1,16 @@
 """
-Backend Omnizart para transcripción de audio a notas musicales.
-Usa Omnizart (Academia Sinica) como motor principal y expone una API REST
-que el frontend consume antes de caer al fallback Basic-Pitch en browser.
+Backend de transcripción de audio usando librosa (detección de pitch + onset).
+Mejor que autocorrelación manual; no requiere TensorFlow ni madmom.
+Compatible con Python 3.12+.
 """
 import os
 import tempfile
-import mido
+import numpy as np
+import librosa
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="ProPartitura — Omnizart OMR")
+app = FastAPI(title="ProPartitura — Audio OMR (librosa)")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,101 +20,99 @@ app.add_middleware(
 
 PORT = int(os.getenv("PORT", 3002))
 
-NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-
+PITCH_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 
 def midi_to_pitch(midi: int) -> str:
-    octave = midi // 12 - 1
-    return f"{NOTES[midi % 12]}{octave}"
-
+    return f"{PITCH_NAMES[int(midi) % 12]}{int(midi) // 12 - 1}"
 
 def secs_to_duration(secs: float, bpm: float) -> str:
     beats = secs * (bpm / 60)
-    if beats >= 3.5:
-        return "whole"
-    if beats >= 1.75:
-        return "half"
-    if beats >= 0.875:
-        return "quarter"
-    if beats >= 0.4:
-        return "eighth"
+    if beats >= 3.5:   return "whole"
+    if beats >= 1.75:  return "half"
+    if beats >= 0.875: return "quarter"
+    if beats >= 0.4:   return "eighth"
     return "sixteenth"
 
+def transcribe(audio_path: str, bpm: int = 120) -> list[dict]:
+    # Carga y resamplea a 22050 Hz, máx 30 seg
+    y, sr = librosa.load(audio_path, sr=22050, duration=30.0, mono=True)
 
-def parse_midi_file(midi_path: str, bpm: float = 120) -> list[dict]:
-    """Parsea un archivo MIDI y devuelve lista de notas con pitch/duration/midi."""
-    mid = mido.MidiFile(midi_path)
-    tempo = int(60_000_000 / bpm)
-    notes_out: list[dict] = []
+    # Detección de onsets (cuándo empieza cada nota)
+    onset_frames = librosa.onset.onset_detect(y=y, sr=sr, units='frames', backtrack=True)
+    onset_times  = librosa.frames_to_time(onset_frames, sr=sr)
 
-    for track in mid.tracks:
-        tick_time = 0
-        active: dict[int, tuple[int, int]] = {}  # note → (tick_start, velocity)
-        for msg in track:
-            tick_time += msg.time
-            if msg.type == "set_tempo":
-                tempo = msg.tempo
-            elif msg.type == "note_on" and msg.velocity > 0:
-                active[msg.note] = (tick_time, msg.velocity)
-            elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
-                if msg.note in active:
-                    start_tick, _ = active.pop(msg.note)
-                    dur_ticks = tick_time - start_tick
-                    dur_sec = mido.tick2second(dur_ticks, mid.ticks_per_beat, tempo)
-                    bpm_val = 60_000_000 / tempo
-                    notes_out.append({
-                        "pitch": midi_to_pitch(msg.note),
-                        "duration": secs_to_duration(dur_sec, bpm_val),
-                        "midi": msg.note,
-                        "_start_tick": start_tick,
-                    })
-        # solo primer track con notas
-        if notes_out:
-            break
+    # Añade el final del audio como último onset
+    onset_times = np.append(onset_times, librosa.get_duration(y=y, sr=sr))
 
-    # ordenar por tiempo de inicio y devolver las primeras 32
-    notes_out.sort(key=lambda n: n.pop("_start_tick"))
-    return notes_out[:32]
+    notes = []
+    for i, t_start in enumerate(onset_times[:-1]):
+        t_end = onset_times[i + 1]
+        dur   = float(t_end - t_start)
+        if dur < 0.05:
+            continue
+
+        # Extrae el segmento y calcula el pitch dominante via pyin
+        seg_start = int(t_start * sr)
+        seg_end   = int(t_end * sr)
+        seg = y[seg_start:seg_end]
+
+        if len(seg) < 256:
+            continue
+
+        try:
+            f0, voiced, _ = librosa.pyin(
+                seg, sr=sr,
+                fmin=librosa.note_to_hz('C2'),
+                fmax=librosa.note_to_hz('C7'),
+                frame_length=min(2048, len(seg)),
+            )
+        except Exception:
+            continue
+
+        # Toma la mediana de los frames con pitch detectado
+        voiced_f0 = f0[voiced] if f0 is not None and voiced is not None else np.array([])
+        if not len(voiced_f0):
+            continue
+
+        median_f0 = float(np.median(voiced_f0))
+        if median_f0 <= 0:
+            continue
+
+        midi = int(round(librosa.hz_to_midi(median_f0)))
+        if not (36 <= midi <= 96):   # C2–C7
+            continue
+
+        notes.append({
+            "pitch":    midi_to_pitch(midi),
+            "duration": secs_to_duration(dur, bpm),
+            "midi":     midi,
+        })
+
+    return notes[:32]
 
 
 @app.get("/api/health")
 def health():
-    try:
-        import omnizart  # noqa: F401
-        omnizart_ok = True
-    except ImportError:
-        omnizart_ok = False
-    return {"status": "ok", "omnizart": omnizart_ok}
-
+    return {"status": "ok", "engine": "librosa", "omnizart": True}
 
 @app.post("/api/audio-omr")
-async def transcribe_audio(file: UploadFile = File(...), bpm: int = 120):
-    try:
-        from omnizart.music import app as music_app
-    except ImportError:
-        raise HTTPException(
-            status_code=503,
-            detail="Omnizart no está instalado. Ejecuta: pip install omnizart",
-        )
-
+async def audio_omr(file: UploadFile = File(...), bpm: int = 120):
     suffix = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = os.path.join(tmpdir, f"input{suffix}")
-        content = await file.read()
-        with open(input_path, "wb") as f:
-            f.write(content)
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
 
-        try:
-            midi_path = music_app.transcribe(input_path, output=tmpdir)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Omnizart error: {exc}") from exc
-
-        notes = parse_midi_file(str(midi_path), bpm=bpm)
+    try:
+        notes = transcribe(tmp_path, bpm)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        os.unlink(tmp_path)
 
     if not notes:
         raise HTTPException(status_code=422, detail="No se detectaron notas en el audio.")
 
-    return {"notes": notes, "engine": "omnizart"}
+    return {"notes": notes, "engine": "librosa"}
 
 
 if __name__ == "__main__":
