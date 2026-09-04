@@ -205,6 +205,198 @@ def transcribe_simple(audio_path: str, bpm: int = 120) -> list[dict]:
 
 # ─── Endpoints ───────────────────────────────────────────────────────────────
 
+def _ql_to_duration(ql: float) -> str:
+    if ql >= 3.5:   return "whole"
+    if ql >= 1.75:  return "half"
+    if ql >= 0.875: return "quarter"
+    if ql >= 0.4:   return "eighth"
+    return "sixteenth"
+
+def _parse_mxl_music21(xml_path: str) -> list:
+    import music21
+    score = music21.converter.parse(xml_path)
+    parts = score.parts
+    if not parts:
+        return []
+    treble = parts[0]
+    notes_out = []
+    for el in treble.flatten().notesAndRests:
+        if el.isRest:
+            continue
+        if el.isChord:
+            highest = max(el.pitches, key=lambda p: p.midi)
+            pitch_str, midi = highest.nameWithOctave, highest.midi
+        else:
+            pitch_str, midi = el.pitch.nameWithOctave, el.pitch.midi
+        if not (48 <= midi <= 96):
+            continue
+        duration = _ql_to_duration(float(el.duration.quarterLength))
+        notes_out.append({"pitch": pitch_str, "duration": duration, "midi": midi})
+    return notes_out[:64]
+
+
+@app.post("/api/omr-image")
+async def omr_image(file: UploadFile = File(...)):
+    """OMR de imagen con Oemer (deep learning) + music21 para parsear MusicXML."""
+    import shutil, sys
+    suffix = os.path.splitext(file.filename or "score.png")[1] or ".png"
+    content = await file.read()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        img_path = os.path.join(tmpdir, f"score{suffix}")
+        out_dir  = os.path.join(tmpdir, "out")
+        os.makedirs(out_dir, exist_ok=True)
+        with open(img_path, "wb") as f:
+            f.write(content)
+
+        # Llamar oemer via su ejecutable (oemer.exe en Windows)
+        oemer_exe = os.path.join(os.path.dirname(sys.executable), "oemer.exe")
+        if not os.path.exists(oemer_exe):
+            oemer_exe = "oemer"  # fallback: en PATH
+        proc = subprocess.run(
+            [oemer_exe, img_path, "-o", out_dir, "--without-deskew"],
+            capture_output=True, text=True, timeout=180,
+        )
+        if proc.returncode != 0:
+            combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            err = combined[-800:].strip()
+            raise HTTPException(status_code=500, detail=f"Oemer error (rc={proc.returncode}): {err}")
+
+        # Buscar el XML de salida
+        xml_files = [f for f in os.listdir(out_dir) if f.endswith(".xml") or f.endswith(".musicxml")]
+        if not xml_files:
+            raise HTTPException(status_code=422, detail="Oemer no detectó pentagramas en la imagen.")
+
+        xml_path = os.path.join(out_dir, xml_files[0])
+        notes = _parse_mxl_music21(xml_path)
+
+    if not notes:
+        raise HTTPException(status_code=422, detail="No se detectaron notas. Prueba con imagen más nítida.")
+    return {"notes": notes, "engine": "oemer+music21"}
+
+
+def _midi_to_notes_music21(midi_path: str, max_notes: int = 64) -> list:
+    """Convierte MIDI → lista de notas usando music21. Extrae la pista con más notas (melodía)."""
+    import music21
+    score = music21.converter.parse(midi_path)
+    # Elegir la parte con más notas (melodía principal)
+    best_part = max(score.parts, key=lambda p: len(p.flatten().notes), default=None)
+    if best_part is None:
+        return []
+    notes_out = []
+    for el in best_part.flatten().notesAndRests:
+        if el.isRest:
+            continue
+        if el.isChord:
+            highest = max(el.pitches, key=lambda p: p.midi)
+            pitch_str, midi = highest.nameWithOctave, highest.midi
+        else:
+            pitch_str, midi = el.pitch.nameWithOctave, el.pitch.midi
+        if not (36 <= midi <= 96):
+            continue
+        duration = _ql_to_duration(float(el.duration.quarterLength))
+        notes_out.append({"pitch": pitch_str, "duration": duration, "midi": midi})
+    return notes_out[:max_notes]
+
+
+@app.post("/api/mt3-transcribe")
+async def mt3_transcribe(file: UploadFile = File(...)):
+    """
+    Transcripción con MR-MT3 (176 MB, Multi-instrument).
+    Primer uso descarga el checkpoint desde HuggingFace.
+    CPU: ~10-30x real-time; GPU: 57x real-time.
+    """
+    import mt3_infer
+
+    suffix  = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
+    content = await file.read()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        audio_path = os.path.join(tmpdir, f"input{suffix}")
+        midi_path  = os.path.join(tmpdir, "mt3_out.mid")
+        with open(audio_path, "wb") as f:
+            f.write(content)
+
+        # MT3 requiere 16 kHz
+        try:
+            y, _ = librosa.load(audio_path, sr=16000, mono=True, duration=60.0)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"No se pudo leer el audio: {e}")
+
+        # Detectar tempo (22 kHz para librosa beat tracker)
+        try:
+            y22, _ = librosa.load(audio_path, sr=22050, mono=True, duration=30.0)
+            tempo_arr, _ = librosa.beat.beat_track(y=y22, sr=22050)
+            tempo = int(float(tempo_arr))
+        except Exception:
+            tempo = 120
+
+        try:
+            midi_file = mt3_infer.transcribe(
+                y, model="mr_mt3", sr=16000,
+                device="cpu", auto_download=True,
+            )
+            midi_file.save(midi_path)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error MT3: {e}")
+
+        notes = _midi_to_notes_music21(midi_path)
+
+    if not notes:
+        raise HTTPException(status_code=422, detail="MT3 no detectó notas en el audio.")
+
+    return {"notes": notes, "engine": "mr_mt3+music21", "tempo": tempo}
+
+
+@app.post("/api/audio-transcribe")
+async def audio_transcribe(file: UploadFile = File(...)):
+    """
+    Transcripción con piano_transcription_inference (deep learning).
+    Mucho mejor que pyin para audio musical real.
+    Funciona en CPU. Descarga modelo ~130MB en el primer uso.
+    """
+    import sys
+    from piano_transcription_inference import PianoTranscription, sample_rate as PT_SR
+
+    suffix  = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
+    content = await file.read()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        audio_path = os.path.join(tmpdir, f"input{suffix}")
+        midi_path  = os.path.join(tmpdir, "transcribed.mid")
+        with open(audio_path, "wb") as f:
+            f.write(content)
+
+        # Cargar audio al sample rate que necesita el modelo (16kHz)
+        try:
+            audio, _ = librosa.load(audio_path, sr=PT_SR, mono=True, duration=60.0)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"No se pudo leer el audio: {e}")
+
+        try:
+            transcriptor = PianoTranscription(device="cpu", checkpoint_path=None)
+            transcriptor.transcribe(audio, midi_path)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error de transcripción: {e}")
+
+        if not os.path.exists(midi_path):
+            raise HTTPException(status_code=422, detail="El modelo no produjo MIDI.")
+
+        notes = _midi_to_notes_music21(midi_path)
+
+    if not notes:
+        raise HTTPException(status_code=422, detail="No se detectaron notas en el audio.")
+
+    # Extraer tempo básico para el frontend
+    try:
+        tempo_arr, _ = librosa.beat.beat_track(y=audio, sr=PT_SR)
+        tempo = int(float(tempo_arr))
+    except Exception:
+        tempo = 120
+
+    return {"notes": notes, "engine": "piano_transcription+music21", "tempo": tempo}
+
+
 @app.get("/api/health")
 def health():
     try:
@@ -212,7 +404,21 @@ def health():
         demucs_ok = True
     except ImportError:
         demucs_ok = False
-    return {"status": "ok", "engine": "librosa", "omnizart": True, "demucs": demucs_ok}
+    try:
+        import oemer  # noqa: F401
+        oemer_ok = True
+    except ImportError:
+        oemer_ok = False
+    try:
+        import mt3_infer  # noqa: F401
+        mt3_ok = True
+    except ImportError:
+        mt3_ok = False
+    return {
+        "status": "ok", "engine": "librosa",
+        "omnizart": True, "demucs": demucs_ok,
+        "oemer": oemer_ok, "mt3": mt3_ok,
+    }
 
 
 @app.post("/api/audio-omr")
@@ -235,77 +441,60 @@ async def audio_omr(file: UploadFile = File(...), bpm: int = 120):
 @app.post("/api/audio-omr-full")
 async def audio_omr_full(file: UploadFile = File(...), bpm: int = 120):
     """
-    Pipeline orquestal de 6 capas:
-    1. Trim 60 s  2. Demucs  3. Key+Tempo  4. pyin  5. Cuantización  6. Limpieza
+    Pipeline orquestal de 6 capas (HPSS en lugar de Demucs — sin timeout):
+    1. Trim 60 s  2. HPSS  3. Key+Tempo+Compás  4. pyin  5. Cuantización  6. Limpieza
     """
     suffix  = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
     content = await file.read()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        raw_path   = os.path.join(tmpdir, f"raw{suffix}")
-        input_path = os.path.join(tmpdir, "input.wav")
-
+        raw_path = os.path.join(tmpdir, f"raw{suffix}")
         with open(raw_path, "wb") as f:
             f.write(content)
 
-        # ── Capa 1: Recortar a 60 s y convertir a WAV ────────────────────
+        # ── Capa 1: Cargar y recortar a 60 s ─────────────────────────────
         try:
-            y_full, sr_full = librosa.load(raw_path, sr=None, mono=False, duration=60.0)
-            sf.write(input_path, y_full.T if y_full.ndim > 1 else y_full, sr_full)
+            y_mono, sr = librosa.load(raw_path, sr=22050, mono=True, duration=60.0)
         except Exception as e:
             raise HTTPException(status_code=422, detail=f"No se pudo leer el audio: {e}")
 
-        # ── Capa 2: Detectar tonalidad, tempo y compás ───────────────────
-        y_mono, sr_mono = librosa.load(input_path, sr=22050, mono=True)
-        key_name, mode, key_sig = detect_key(y_mono, sr_mono)
-        tempo, beat_times       = detect_tempo_and_beats(y_mono, sr_mono)
-        time_sig                = detect_meter(y_mono, sr_mono, tempo)
+        # ── Capa 2: Tonalidad, tempo y compás ────────────────────────────
+        key_name, mode, key_sig = detect_key(y_mono, sr)
+        tempo, beat_times       = detect_tempo_and_beats(y_mono, sr)
+        time_sig                = detect_meter(y_mono, sr, tempo)
         beat_dur                = 60.0 / max(tempo, 40.0)
 
-        # ── Capa 1b: Demucs — separar fuentes ────────────────────────────
-        try:
-            proc = subprocess.run(
-                [PYTHON, "-m", "demucs",
-                 "--out", tmpdir,
-                 "--name", "htdemucs",
-                 "--two-stems", "other",
-                 input_path],
-                capture_output=True, text=True, timeout=360,
-            )
-            if proc.returncode != 0:
-                raise RuntimeError(proc.stderr[-600:])
-        except subprocess.TimeoutExpired:
-            raise HTTPException(status_code=504, detail="Demucs tardó demasiado. El audio (60 s) no pudo procesarse.")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Demucs error: {e}")
+        # ── Capa 1b: HPSS — separación armónica / percusiva ──────────────
+        # Rápido (~1 s); sustituye Demucs para evitar timeouts en CPU
+        y_harm, y_perc = librosa.effects.hpss(y_mono, margin=3.0)
 
-        track_name = os.path.splitext(os.path.basename(input_path))[0]
-        stem_dir   = os.path.join(tmpdir, "htdemucs", track_name)
-        if not os.path.isdir(stem_dir):
-            raise HTTPException(status_code=500, detail="Demucs no generó stems.")
-
-        stem_files = {
-            name: os.path.join(stem_dir, f"{name}.wav")
-            for name in ("other", "no_other")
-            if os.path.exists(os.path.join(stem_dir, f"{name}.wav"))
+        stem_map = {
+            "Melodía / Cuerdas":    y_harm,
+            "Bajo / Percusión":     y_perc,
         }
 
+        # Guardar stems como WAV temporales para reutilizar transcribe_stem
+        stems: dict[str, str] = {}
+        for label, y_stem in stem_map.items():
+            p = os.path.join(tmpdir, f"{label}.wav")
+            sf.write(p, y_stem, sr)
+            stems[label] = p
+
         # ── Capas 3-5: pyin + cuantización + limpieza por stem ───────────
-        label_map = {"other": "Melodía / Cuerdas", "no_other": "Bajo / Armónica"}
         voices = []
-        for stem_name, stem_path in stem_files.items():
+        for label, stem_path in stems.items():
             raw   = transcribe_stem(stem_path, beat_times, beat_dur, max_sec=60.0)
             clean = clean_notes(raw, beat_dur)
             if clean:
-                voices.append({"voice": label_map.get(stem_name, stem_name), "notes": clean})
+                voices.append({"voice": label, "notes": clean})
 
         if not voices:
-            raise HTTPException(status_code=422, detail="No se detectaron notas en ningún stem.")
+            raise HTTPException(status_code=422, detail="No se detectaron notas en el audio.")
 
         # ── Capa 6: Respuesta estructurada ───────────────────────────────
         return {
             "voices":        voices,
-            "engine":        "demucs+librosa",
+            "engine":        "hpss+librosa",
             "key":           key_name,
             "mode":          mode,
             "keyLabel":      f"{key_name} {mode}",

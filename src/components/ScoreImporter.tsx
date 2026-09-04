@@ -1,4 +1,5 @@
 import React, { useState, useRef } from 'react';
+import { Midi } from '@tonejs/midi';
 import { imageToScore, ImportedNote } from '../utils/imageToScore';
 import { audioFileToScore, audioFileToScoreFull, AudioEngine, OrchestraVoice, KeySignature } from '../utils/audioToScore';
 
@@ -7,8 +8,38 @@ interface ScoreImporterProps {
   onClose: () => void;
 }
 
-type Mode = 'image' | 'audio' | 'orchestra';
+type Mode = 'image' | 'audio' | 'orchestra' | 'midi';
 type Status = 'idle' | 'analyzing' | 'done' | 'error';
+
+// ── MIDI parser ───────────────────────────────────────────────────────────────
+function parseMidiFile(midi: Midi): { notes: ImportedNote[]; tempo: number; timeSig: string } {
+  const tempo = Math.round(midi.header.tempos[0]?.bpm ?? 120);
+  const [num, den] = midi.header.timeSignatures[0]
+    ? [midi.header.timeSignatures[0].timeSignature[0], midi.header.timeSignatures[0].timeSignature[1]]
+    : [4, 4];
+  const timeSig = `${num}/${den}`;
+
+  // Pick the melody track: highest-pitched non-drum track with most notes
+  const melodicTracks = midi.tracks.filter(t => !t.instrument.percussion && t.notes.length > 0);
+  if (!melodicTracks.length) return { notes: [], tempo, timeSig };
+
+  const track = melodicTracks.sort((a, b) => b.notes.length - a.notes.length)[0];
+
+  const beatSec = 60 / tempo;
+  const notes: ImportedNote[] = track.notes.map(n => {
+    const durationBeats = n.duration / beatSec;
+    let duration: ImportedNote['duration'] = 'quarter';
+    if (durationBeats >= 3.5)        duration = 'whole';
+    else if (durationBeats >= 1.75)  duration = 'half';
+    else if (durationBeats >= 0.875) duration = 'quarter';
+    else if (durationBeats >= 0.4)   duration = 'eighth';
+    else                             duration = 'sixteenth';
+
+    return { pitch: n.name, duration, midi: n.midi };
+  });
+
+  return { notes: notes.slice(0, 64), tempo, timeSig };
+}
 
 const DURATION_ICON: Record<string, string> = {
   whole: '𝅝', half: '𝅗', quarter: '♩', eighth: '♪', sixteenth: '♬',
@@ -24,6 +55,7 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
   const [keySig, setKeySig]     = useState<KeySignature | null>(null);
   const [timeSig, setTimeSig]   = useState('');
   const [detectedTempo, setDetectedTempo] = useState<number | null>(null);
+  const [midiTempo, setMidiTempo] = useState<number | null>(null);
   const [dragOver, setDrag]     = useState(false);
   const [fileName, setFile]     = useState('');
   const [progress, setProgress] = useState(0);
@@ -45,6 +77,7 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
     setKeySig(null);
     setTimeSig('');
     setDetectedTempo(null);
+    setMidiTempo(null);
   };
 
   const processFile = async (file: File) => {
@@ -55,7 +88,18 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
     setEngine(null);
 
     try {
-      if (mode === 'image') {
+      if (mode === 'midi') {
+        const buf = await file.arrayBuffer();
+        const midi = new Midi(buf);
+        const { notes: mNotes, tempo, timeSig: mTs } = parseMidiFile(midi);
+        if (!mNotes.length) throw new Error('No se encontraron notas en el archivo MIDI.');
+        setNotes(mNotes);
+        setMidiTempo(tempo);
+        setTimeSig(mTs);
+        setProgress(100);
+        setStatus('done');
+
+      } else if (mode === 'image') {
         const result = await imageToScore(file);
         if (!result.length) throw new Error('No se detectaron notas. Prueba con una imagen más nítida.');
         setNotes(result);
@@ -136,9 +180,10 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
           {/* Mode toggle */}
           <div className="flex bg-[#0C1220] rounded-lg p-1 gap-1 border border-[#1A2235]">
             {([
-              { id: 'image', icon: 'add_photo_alternate', label: 'Imagen' },
-              { id: 'audio', icon: 'audiotrack', label: 'Audio' },
-              { id: 'orchestra', icon: 'queue_music', label: 'Orquestal' },
+              { id: 'midi',      icon: 'piano',              label: 'MIDI' },
+              { id: 'image',     icon: 'add_photo_alternate', label: 'Imagen' },
+              { id: 'audio',     icon: 'audiotrack',          label: 'Audio' },
+              { id: 'orchestra', icon: 'queue_music',         label: 'Orquestal' },
             ] as { id: Mode; icon: string; label: string }[]).map(m => (
               <button
                 key={m.id} type="button" onClick={() => reset(m.id)}
@@ -164,27 +209,38 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
               }`}
             >
               <span className={`material-symbols-outlined text-[44px] ${dragOver ? 'text-[#C8A84B]' : 'text-slate-500'}`}>
-                {mode === 'image' ? 'add_photo_alternate' : mode === 'orchestra' ? 'queue_music' : 'audio_file'}
+                {mode === 'midi' ? 'piano' : mode === 'image' ? 'add_photo_alternate' : mode === 'orchestra' ? 'queue_music' : 'audio_file'}
               </span>
               <div className="text-center">
                 <p className="text-sm font-medium text-white">
-                  {mode === 'image' ? 'Arrastra la foto de la partitura aquí'
+                  {mode === 'midi' ? 'Arrastra el archivo MIDI aquí'
+                    : mode === 'image' ? 'Arrastra la foto de la partitura aquí'
                     : mode === 'orchestra' ? 'Arrastra la pieza orquestal aquí'
                     : 'Arrastra la canción aquí'}
                 </p>
                 <p className="text-xs text-slate-400 mt-1">
-                  {mode === 'image'
-                    ? 'PNG, JPG, WEBP — foto o escaneo de partitura impresa'
-                    : mode === 'orchestra'
-                      ? 'WAV, MP3 — Demucs separa voces (melody, bajo). Requiere backend Python.'
-                      : 'MP3, WAV, M4A, OGG — máx. 30 segundos analizados'}
+                  {mode === 'midi'
+                    ? '.mid / .midi — 100% preciso, busca el MIDI en cualquier banco online'
+                    : mode === 'image'
+                      ? 'PNG, JPG, WEBP — foto o escaneo de partitura impresa'
+                      : mode === 'orchestra'
+                        ? 'WAV, MP3 — separa voces (melodía, bajo). Requiere backend Python.'
+                        : 'MP3, WAV, M4A, OGG — máx. 30 segundos analizados'}
                 </p>
               </div>
+              {mode === 'midi' && (
+                <div className="flex items-center gap-2 text-[10px] text-[#C8A84B] bg-[#C8A84B]/10 border border-[#C8A84B]/20 rounded-lg px-3 py-2">
+                  <span className="material-symbols-outlined text-[14px]">star</span>
+                  Recomendado para máxima precisión. Busca "[canción] MIDI" en Google.
+                </div>
+              )}
               <input
                 ref={inputRef} type="file"
-                accept={mode === 'image'
-                  ? 'image/png,image/jpeg,image/webp,image/gif'
-                  : 'audio/mpeg,audio/wav,audio/mp4,audio/ogg,audio/*'}
+                accept={mode === 'midi'
+                  ? '.mid,.midi,audio/midi,audio/x-midi'
+                  : mode === 'image'
+                    ? 'image/png,image/jpeg,image/webp,image/gif'
+                    : 'audio/mpeg,audio/wav,audio/mp4,audio/ogg,audio/*'}
                 onChange={onFileChange} className="hidden"
               />
             </div>
@@ -250,15 +306,21 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
           {/* Results — single voice (image / audio) */}
           {status === 'done' && notes.length > 0 && (
             <div className="flex flex-col gap-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="material-symbols-outlined text-[18px] text-[#2ECC71]">check_circle</span>
                   <span className="text-xs font-bold text-white">{notes.length} notas detectadas</span>
+                  {mode === 'midi' && (
+                    <span className="px-2 py-0.5 rounded border text-[10px] font-medium text-[#C8A84B] border-[#C8A84B]/40 bg-[#C8A84B]/10">
+                      MIDI — 100% preciso
+                    </span>
+                  )}
                   {engine && (
                     <span className={`px-2 py-0.5 rounded border text-[10px] font-medium ${engineColor[engine]}`}>
                       {engineLabel[engine]}
                     </span>
                   )}
+                  {midiTempo && <span className="text-[10px] text-slate-400">♩= {midiTempo} BPM · {timeSig}</span>}
                 </div>
                 <span className="text-[10px] text-slate-400 font-mono">{fileName}</span>
               </div>

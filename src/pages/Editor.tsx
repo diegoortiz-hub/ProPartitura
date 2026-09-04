@@ -32,6 +32,9 @@ export const Editor: React.FC = () => {
   const [importedNotes, setImportedNotes] = useState<NoteData[] | undefined>(undefined);
   const [importedKeySig, setImportedKeySig]   = useState<KeySignature | undefined>(undefined);
   const [importedTimeSig, setImportedTimeSig] = useState<string | undefined>(undefined);
+  const [activeNoteIdx, setActiveNoteIdx] = useState(-1);
+
+  const NOTES_PER_SYSTEM = 12;
 
   const handleSelectNote = (note: NoteData) => {
     setSelectedNote(note);
@@ -314,34 +317,59 @@ export const Editor: React.FC = () => {
                 </div>
               </div>
 
-              {/* Staff System 1 */}
-              <div className="w-full mb-8">
-                <div className="text-[11px] font-semibold text-[#C8A84B] uppercase tracking-wider flex items-center justify-between mb-2">
-                  <span>I. Sistema Principal (Piano Forte)</span>
-                  <span className="text-[10px] opacity-60">Compases 1 - 4</span>
-                </div>
-                <StaffSVG
-                  selectedNoteId={selectedNote.id}
-                  onSelectNote={handleSelectNote}
-                  theme={scoreTheme}
-                  importedNotes={importedNotes}
-                  keySignature={importedKeySig}
-                  timeSignature={importedTimeSig}
-                />
-              </div>
-
-              {/* Staff System 2 */}
-              <div className="w-full mb-6">
-                <div className="text-[11px] font-semibold text-[#C8A84B] uppercase tracking-wider flex items-center justify-between mb-2">
-                  <span>II. Desarrollo Temático</span>
-                  <span className="text-[10px] opacity-60">Compases 5 - 8</span>
-                </div>
-                <StaffSVG
-                  selectedNoteId={selectedNote.id}
-                  onSelectNote={handleSelectNote}
-                  theme={scoreTheme}
-                />
-              </div>
+              {/* Staff Systems — dynamic when notes imported, static (2 systems) otherwise */}
+              {importedNotes && importedNotes.length > 0 ? (
+                Array.from({ length: Math.ceil(importedNotes.length / NOTES_PER_SYSTEM) }).map((_, sysIdx) => {
+                  const offset = sysIdx * NOTES_PER_SYSTEM;
+                  const slice  = importedNotes.slice(offset, offset + NOTES_PER_SYSTEM);
+                  const m1     = offset / 4 + 1;
+                  const m2     = Math.min(Math.ceil((offset + slice.length) / 4), Math.ceil(importedNotes.length / 4));
+                  const label  = `Sistema ${sysIdx + 1}`;
+                  return (
+                    <div key={sysIdx} className="w-full mb-8">
+                      <div className="text-[11px] font-semibold text-[#C8A84B] uppercase tracking-wider flex items-center justify-between mb-2">
+                        <span>{label}</span>
+                        <span className="text-[10px] opacity-60">Compases {m1} – {m2}</span>
+                      </div>
+                      <StaffSVG
+                        selectedNoteId={selectedNote.id}
+                        onSelectNote={handleSelectNote}
+                        theme={scoreTheme}
+                        importedNotes={slice}
+                        keySignature={sysIdx === 0 ? importedKeySig : undefined}
+                        timeSignature={sysIdx === 0 ? importedTimeSig : undefined}
+                        activeNoteIdx={activeNoteIdx}
+                        noteOffset={offset}
+                      />
+                    </div>
+                  );
+                })
+              ) : (
+                <>
+                  <div className="w-full mb-8">
+                    <div className="text-[11px] font-semibold text-[#C8A84B] uppercase tracking-wider flex items-center justify-between mb-2">
+                      <span>I. Sistema Principal (Piano Forte)</span>
+                      <span className="text-[10px] opacity-60">Compases 1 - 4</span>
+                    </div>
+                    <StaffSVG
+                      selectedNoteId={selectedNote.id}
+                      onSelectNote={handleSelectNote}
+                      theme={scoreTheme}
+                    />
+                  </div>
+                  <div className="w-full mb-6">
+                    <div className="text-[11px] font-semibold text-[#C8A84B] uppercase tracking-wider flex items-center justify-between mb-2">
+                      <span>II. Desarrollo Temático</span>
+                      <span className="text-[10px] opacity-60">Compases 5 - 8</span>
+                    </div>
+                    <StaffSVG
+                      selectedNoteId={selectedNote.id}
+                      onSelectNote={handleSelectNote}
+                      theme={scoreTheme}
+                    />
+                  </div>
+                </>
+              )}
 
               {/* Footer text */}
               <div className="w-full mt-6 pt-3 border-t border-current/10 flex items-center justify-between text-[11px] opacity-60">
@@ -356,7 +384,13 @@ export const Editor: React.FC = () => {
         </div>
 
         {/* Bottom Playback Bar */}
-        <PlaybackBar tempo={120} totalSeconds={225} importedNotes={importedNotes} />
+        <PlaybackBar
+          tempo={120}
+          totalSeconds={225}
+          importedNotes={importedNotes}
+          onNoteChange={setActiveNoteIdx}
+          timeSignature={importedTimeSig ?? '4/4'}
+        />
       </div>
 
       {showImporter && (

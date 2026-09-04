@@ -31,26 +31,49 @@ const MAX_AUDIO_SEC = 30; // limita el audio para no colgar el browser
 
 // ─── Motor 1: Omnizart ───────────────────────────────────────────────────────
 
-async function omnizartAvailable(): Promise<boolean> {
+interface HealthInfo { omnizart?: boolean; mt3?: boolean }
+
+async function backendHealth(): Promise<HealthInfo> {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 2_000);
     const res = await fetch(`${OMNIZART_URL}/api/health`, { signal: ctrl.signal });
     clearTimeout(t);
-    const json = await res.json();
-    return !!json.omnizart;
+    return await res.json();
   } catch {
-    return false;
+    return {};
   }
 }
 
-async function transcribeWithOmnizart(file: File, bpm: number): Promise<ImportedNote[]> {
+async function transcribeWithMT3(file: File): Promise<ImportedNote[]> {
   const form = new FormData();
   form.append('file', file);
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 60_000);
+  // Primera vez descarga 176 MB desde HuggingFace
+  const t = setTimeout(() => ctrl.abort(), 300_000);
   try {
-    const res = await fetch(`${OMNIZART_URL}/api/audio-omr?bpm=${bpm}`, {
+    const res = await fetch(`${OMNIZART_URL}/api/mt3-transcribe`, {
+      method: 'POST', body: form, signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail ?? `HTTP ${res.status}`);
+    }
+    const { notes } = await res.json();
+    return notes as ImportedNote[];
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function transcribeWithOmnizart(file: File, _bpm: number): Promise<ImportedNote[]> {
+  const form = new FormData();
+  form.append('file', file);
+  const ctrl = new AbortController();
+  // piano_transcription_inference tarda ~60-90s en CPU la primera vez
+  const t = setTimeout(() => ctrl.abort(), 180_000);
+  try {
+    const res = await fetch(`${OMNIZART_URL}/api/audio-transcribe`, {
       method: 'POST', body: form, signal: ctrl.signal,
     });
     if (!res.ok) {
@@ -154,16 +177,29 @@ export async function audioFileToScore(
   bpm = 120,
   onProgress?: (engine: AudioEngine, pct: number) => void
 ): Promise<TranscribeResult> {
-  const hasOmnizart = await omnizartAvailable();
+  const health = await backendHealth();
 
-  if (hasOmnizart) {
+  // Motor 1: MR-MT3 (multi-instrumento, mejor calidad)
+  if (health.mt3) {
+    onProgress?.('omnizart', 0);
+    try {
+      const notes = await transcribeWithMT3(file);
+      onProgress?.('omnizart', 100);
+      return { notes, engine: 'omnizart' };
+    } catch (e) {
+      console.warn('[OMR] MT3 falló, probando piano_transcription:', e);
+    }
+  }
+
+  // Motor 2: piano_transcription_inference (piano, CPU)
+  if (health.omnizart) {
     onProgress?.('omnizart', 0);
     try {
       const notes = await transcribeWithOmnizart(file, bpm);
       onProgress?.('omnizart', 100);
       return { notes, engine: 'omnizart' };
     } catch (e) {
-      console.warn('[OMR] Omnizart falló, usando Basic-Pitch:', e);
+      console.warn('[OMR] piano_transcription falló, usando Basic-Pitch:', e);
     }
   }
 

@@ -2,17 +2,22 @@ require('dotenv').config();
 const express = require('express');
 const multer  = require('multer');
 const cors    = require('cors');
-const { execSync } = require('child_process');
+const { spawnSync } = require('child_process');
 const AdmZip  = require('adm-zip');
 const { XMLParser } = require('fast-xml-parser');
 const path    = require('path');
 const fs      = require('fs');
 const os      = require('os');
+const sharp   = require('sharp');
 
 const app = express();
 app.use(cors());
 
-const upload = multer({ dest: os.tmpdir() });
+// os.tmpdir() on Windows returns 8.3 short paths (PROFES~1) which Java cannot resolve.
+// Use a local tmp folder with a known long path instead.
+const LOCAL_TMP = path.join(__dirname, 'tmp');
+if (!fs.existsSync(LOCAL_TMP)) fs.mkdirSync(LOCAL_TMP);
+const upload = multer({ dest: LOCAL_TMP });
 
 const PORT = process.env.PORT || 3001;
 
@@ -28,15 +33,45 @@ function findAudiveris() {
   return AUDIVERIS_CANDIDATES.find(p => fs.existsSync(p)) || null;
 }
 
+function getAudiverisArgs(tmpDir, imgPath) {
+  // Lower grid detection thresholds so watermarked/screen-res images work
+  return [
+    '-batch', '-export',
+    '-option', 'GRID.minStaffLines=3',
+    '-option', 'SCALE.minInterline=8',
+    '-output', tmpDir,
+    imgPath,
+  ];
+}
+
 function getAudiverisCmd(tmpDir, imgPath) {
   const bin = findAudiveris();
   if (!bin) return null;
+  const args = getAudiverisArgs(tmpDir, imgPath).map(a => `"${a}"`).join(' ');
   if (bin.endsWith('.exe') || bin.endsWith('.bat')) {
-    return `"${bin}" -batch -export -output "${tmpDir}" "${imgPath}"`;
+    return `"${bin}" ${args}`;
   }
-  // JAR legacy
   const java = process.env.JAVA_BIN || 'java';
-  return `"${java}" -jar "${bin}" -batch -export -output "${tmpDir}" "${imgPath}"`;
+  return `"${java}" -jar "${bin}" ${args}`;
+}
+
+// Python venv + script para parsear MXL con music21
+const PYTHON_EXE  = path.join(__dirname, '..', 'backend-py', '.venv', 'Scripts', 'python.exe');
+const PARSE_SCRIPT = path.join(__dirname, 'parse_mxl.py');
+
+function parseMxlWithMusic21(mxlPath) {
+  const proc = spawnSync(PYTHON_EXE, [PARSE_SCRIPT, mxlPath], {
+    timeout: 30_000,
+    encoding: 'utf8',
+  });
+  if (proc.status !== 0) {
+    const err = (proc.stderr || proc.stdout || '').slice(-500);
+    throw new Error('music21 parse error: ' + err);
+  }
+  const out = (proc.stdout || '').trim();
+  const result = JSON.parse(out);
+  if (result.error) throw new Error(result.error);
+  return result.notes;
 }
 
 // step name → semitone offset within octave
@@ -63,31 +98,36 @@ function parseMusicXml(xml) {
   const parts = doc?.['score-partwise']?.part ?? [];
   for (const part of parts) {
     for (const measure of (part.measure ?? [])) {
-      for (const note of (measure.note ?? [])) {
-        // skip rests and chords (only take the top voice note)
-        if (note.rest !== undefined) continue;
-        if (note.chord !== undefined) continue;
-
+      const rawNotes = measure.note ?? [];
+      // Group consecutive chord notes together, then pick the highest pitch
+      let pending = null; // { note, midi }
+      for (const note of rawNotes) {
+        if (note.rest !== undefined) { if (pending) { notes.push(pending); pending = null; } continue; }
         const p = note.pitch;
         if (!p) continue;
-
         const step   = String(p.step ?? 'C');
         const octave = parseInt(p.octave ?? 4, 10);
-        const alter  = parseInt(p.alter  ?? 0, 10);
-
-        const midi  = (octave + 1) * 12 + (STEP_SEMI[step] ?? 0) + alter;
-        const pitch = `${step}${alter === 1 ? '#' : alter === -1 ? 'b' : ''}${octave}`;
+        const alter  = parseFloat(p.alter ?? 0);
+        const midi   = (octave + 1) * 12 + (STEP_SEMI[step] ?? 0) + Math.round(alter);
+        const pitch  = `${step}${alter === 1 ? '#' : alter === -1 ? 'b' : ''}${octave}`;
         const duration = TYPE_MAP[note.type] ?? 'quarter';
 
-        notes.push({ pitch, duration, midi });
+        if (note.chord !== undefined && pending) {
+          // Part of a chord: keep the highest MIDI (melody note)
+          if (midi > pending.midi) pending = { pitch, duration, midi };
+        } else {
+          if (pending) notes.push(pending);
+          pending = { pitch, duration, midi };
+        }
       }
+      if (pending) { notes.push(pending); pending = null; }
     }
     break; // only first part (treble melody)
   }
   return notes;
 }
 
-app.post('/api/omr', upload.single('file'), (req, res) => {
+app.post('/api/omr', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No se recibió imagen.' });
 
   const cmd = getAudiverisCmd('__TMP__', req.file.path);
@@ -98,22 +138,52 @@ app.post('/api/omr', upload.single('file'), (req, res) => {
     });
   }
 
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'propart-omr-'));
+  // Audiveris requires proper extension and high-resolution B&W image
+  const origName = req.file.originalname || 'score.png';
+  const ext = path.extname(origName) || '.png';
+  const rawPath = req.file.path + ext;
+  try { fs.renameSync(req.file.path, rawPath); } catch (_) {}
+
+  // Preprocess: upscale to ~300 DPI equivalent, grayscale, high contrast
+  // Audiveris needs thick, clear staff lines to detect staves
+  const tmpDir = fs.mkdtempSync(path.join(LOCAL_TMP, 'omr-'));
+  const imgPath = path.join(tmpDir, 'score_processed.png');
   try {
-    execSync(
-      getAudiverisCmd(tmpDir, req.file.path),
-      { timeout: 90_000, stdio: 'pipe' }
-    );
+    const meta = await sharp(rawPath).metadata();
+    const w = meta.width || 1000;
+    // Scale to at least 2400px wide — Audiveris needs thick, visible staff lines
+    const targetW = Math.max(w, 2400);
+    await sharp(rawPath)
+      .resize({ width: targetW, kernel: 'lanczos3' })
+      .grayscale()
+      .normalise()
+      .sharpen({ sigma: 1.5 })   // enhance line edges without breaking them
+      .png({ compressionLevel: 0 })
+      .toFile(imgPath);
+  } catch (preprocessErr) {
+    console.error('[preprocess]', preprocessErr.message);
+    fs.copyFileSync(rawPath, imgPath);
+  }
+  try {
+    {
+      const bin = findAudiveris();
+      const audArgs = getAudiverisArgs(tmpDir, imgPath);
+      const proc = spawnSync(bin, audArgs, { timeout: 120_000, encoding: 'utf8' });
+      const combined = (proc.stdout || '') + '\n' + (proc.stderr || '');
+      console.log('[Audiveris]', combined.slice(-1000));
+      if (proc.status !== 0) {
+        const warnLines = combined.split('\n')
+          .filter(l => l.includes('WARN') || l.includes('Exception') || l.includes('Error'))
+          .join('\n').slice(-800);
+        throw new Error(warnLines || proc.error?.message || 'Audiveris retornó error');
+      }
+    }
 
     const mxlFiles = fs.readdirSync(tmpDir).filter(f => f.endsWith('.mxl'));
-    if (!mxlFiles.length) throw new Error('Audiveris no generó ningún archivo MXL. Comprueba que la imagen sea legible.');
+    if (!mxlFiles.length) throw new Error('Audiveris procesó la imagen pero no detectó pentagramas. Usa una imagen de partitura clara (PNG/JPG, >300 dpi).');
 
-    const zip = new AdmZip(path.join(tmpDir, mxlFiles[0]));
-    const xmlEntry = zip.getEntries().find(e => e.entryName.endsWith('.xml'));
-    if (!xmlEntry) throw new Error('El MXL de Audiveris no contiene XML interno.');
-
-    const xmlContent = zip.readAsText(xmlEntry);
-    const notes = parseMusicXml(xmlContent);
+    const mxlPath = path.join(tmpDir, mxlFiles[0]);
+    const notes = parseMxlWithMusic21(mxlPath);
 
     if (!notes.length) throw new Error('No se detectaron notas en la imagen. Prueba con una imagen más nítida.');
 
@@ -122,7 +192,7 @@ app.post('/api/omr', upload.single('file'), (req, res) => {
     res.status(500).json({ error: err.message });
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
-    try { fs.unlinkSync(req.file.path); } catch (_) {}
+    try { fs.unlinkSync(rawPath); } catch (_) {}
   }
 });
 

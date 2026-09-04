@@ -26,6 +26,8 @@ interface StaffSVGProps {
   importedNotes?: NoteData[];
   keySignature?: KeySignature;
   timeSignature?: string;
+  activeNoteIdx?: number;  // global index of note being played
+  noteOffset?: number;     // this system starts at this index
 }
 
 // Compute Y coordinate from pitch string (treble clef, staff lines at 36–84)
@@ -61,6 +63,8 @@ export const StaffSVG: React.FC<StaffSVGProps> = ({
   importedNotes,
   keySignature,
   timeSignature,
+  activeNoteIdx = -1,
+  noteOffset = 0,
 }) => {
   const isDark = theme === 'dark';
   const staffLineColor = isDark ? 'rgba(255, 255, 255, 0.22)' : '#45464c';
@@ -106,11 +110,14 @@ export const StaffSVG: React.FC<StaffSVGProps> = ({
         <line stroke={staffLineColor} strokeWidth="0.8" x1="10" x2="850" y1="72" y2="72" />
         <line stroke={staffLineColor} strokeWidth="0.8" x1="10" x2="850" y1="84" y2="84" />
 
-        {/* Barlines */}
+        {/* Barline izquierda siempre visible; las internas se generan dinámicamente */}
         <line stroke={barLineColor} strokeWidth="1.2" x1="10" x2="10" y1="36" y2="84" />
-        <line stroke={barLineColor} strokeWidth="1" x1="250" x2="250" y1="36" y2="84" />
-        <line stroke={barLineColor} strokeWidth="1" x1="450" x2="450" y1="36" y2="84" />
-        <line stroke={barLineColor} strokeWidth="1" x1="650" x2="650" y1="36" y2="84" />
+        {/* Barlines estáticos solo cuando NO hay notas importadas */}
+        {!importedNotes && <>
+          <line stroke={barLineColor} strokeWidth="1" x1="250" x2="250" y1="36" y2="84" />
+          <line stroke={barLineColor} strokeWidth="1" x1="450" x2="450" y1="36" y2="84" />
+          <line stroke={barLineColor} strokeWidth="1" x1="650" x2="650" y1="36" y2="84" />
+        </>}
         <line stroke={barLineColor} strokeWidth="2" x1="850" x2="850" y1="36" y2="84" />
 
         {/* G-Clef */}
@@ -378,52 +385,115 @@ export const StaffSVG: React.FC<StaffSVGProps> = ({
         </g>
 
         </>}
-        {/* IMPORTED NOTES — dynamic rendering overrides static notes */}
+        {/* IMPORTED NOTES — layout por compases según cifra indicadora */}
         {importedNotes && importedNotes.length > 0 && (() => {
           const START_X = 84;
-          const END_X = 840;
+          const END_X   = 840;
           const visibleNotes = importedNotes.slice(0, 16);
           const shift = autoOctaveShift(visibleNotes);
-          const step = visibleNotes.length > 1 ? (END_X - START_X) / (visibleNotes.length - 1) : 0;
 
-          return visibleNotes.map((note, i) => {
-            const cx = visibleNotes.length === 1 ? START_X : START_X + i * step;
-            const cy = pitchToY(note.pitch, shift);
-            const isSelected = note.id === selectedNoteId;
-            const col = isSelected ? selectedNoteColor : defaultNoteColor;
-            const isOpen = note.duration === 'whole' || note.duration === 'half';
-            const hasStem = note.duration !== 'whole';
-            const stemUp = cy >= 60;
-            const hasSharp = note.pitch.includes('#');
-            const hasFlat = note.pitch.includes('b') && note.pitch.length > 2;
-            // Ledger lines: every 12px below staff (96, 108, 120) or above (24)
-            const ledgers: number[] = [];
-            for (let ly = 96; ly <= cy + 6; ly += 12) ledgers.push(ly);
-            if (cy <= 30) ledgers.push(24);
-            if (cy <= 18) ledgers.push(12);
-            return (
-              <g key={`imp-${i}`} className={interactive ? 'cursor-pointer' : ''} onClick={() => { if (interactive && onSelectNote) { playNote(note.pitch, 0.4, 80); onSelectNote(note); } }}>
-                {isSelected && <circle cx={cx} cy={cy} r={14} fill="rgba(74,158,255,0.15)" />}
-                {ledgers.map(ly => <line key={ly} x1={cx-10} x2={cx+10} y1={ly} y2={ly} stroke={col} strokeWidth="0.8" />)}
-                {hasSharp && <text x={cx-14} y={cy+4} fontSize="10" fill={col} fontFamily="serif">♯</text>}
-                {hasFlat && <text x={cx-14} y={cy+4} fontSize="10" fill={col} fontFamily="serif">♭</text>}
-                <ellipse cx={cx} cy={cy} rx={6.5} ry={4.5}
-                  transform={`rotate(-18 ${cx} ${cy})`}
-                  fill={isOpen ? (isDark ? '#131929' : '#FAFAF7') : col}
-                  stroke={col} strokeWidth={isOpen ? '1.8' : '0'}
-                />
-                {hasStem && (
-                  <line
-                    x1={stemUp ? cx+6 : cx-6} y1={stemUp ? cy-2 : cy+2}
-                    x2={stemUp ? cx+6 : cx-6} y2={stemUp ? cy-34 : cy+34}
-                    stroke={col} strokeWidth="1.2"
-                  />
-                )}
-                {note.duration === 'eighth' && stemUp && <path d={`M ${cx+6} ${cy-36} Q ${cx+18} ${cy-24} ${cx+10} ${cy-18}`} fill="none" stroke={col} strokeWidth="1.2" />}
-                {note.duration === 'eighth' && !stemUp && <path d={`M ${cx-6} ${cy+36} Q ${cx-18} ${cy+24} ${cx-10} ${cy+18}`} fill="none" stroke={col} strokeWidth="1.2" />}
-              </g>
-            );
-          });
+          // Quarter-lengths por duración
+          const DUR_QL: Record<string, number> = {
+            whole: 4, half: 2, quarter: 1, eighth: 0.5, sixteenth: 0.25,
+          };
+
+          // Cifra indicadora → quarter-lengths por compás
+          const [numStr, denStr] = (timeSignature ?? '4/4').split('/');
+          const tsNum = parseInt(numStr) || 4;
+          const tsDen = parseInt(denStr) || 4;
+          // 4/4 → 4*(4/4)=4  |  3/4 → 3  |  6/8 → 6*(4/8)=3  |  2/4 → 2
+          const qlPerMeasure = tsNum * (4 / tsDen);
+
+          // Agrupar notas en compases (llenando hasta qlPerMeasure)
+          interface MGroup { notes: typeof visibleNotes; offsets: number[] }
+          const measures: MGroup[] = [];
+          let curM: MGroup = { notes: [], offsets: [] };
+          let curQL = 0;
+          for (const note of visibleNotes) {
+            const ql = DUR_QL[note.duration] ?? 1;
+            // Iniciar nuevo compás si el actual se llenoría y ya tiene notas
+            if (curQL + ql > qlPerMeasure + 0.001 && curM.notes.length > 0) {
+              measures.push(curM);
+              curM = { notes: [], offsets: [] };
+              curQL = 0;
+            }
+            curM.offsets.push(curQL);
+            curM.notes.push(note);
+            curQL += ql;
+            // Compás exactamente lleno → siguiente compás
+            if (Math.abs(curQL - qlPerMeasure) < 0.001) {
+              measures.push(curM);
+              curM = { notes: [], offsets: [] };
+              curQL = 0;
+            }
+          }
+          if (curM.notes.length > 0) measures.push(curM);
+
+          const numM = Math.max(measures.length, 1);
+          const mw   = (END_X - START_X) / numM; // ancho de cada compás en SVG
+
+          // X de una nota: inicio del compás + posición proporcional dentro de él
+          const noteX = (mIdx: number, offsetQL: number) =>
+            START_X + mIdx * mw + (offsetQL / qlPerMeasure) * mw + mw * 0.08;
+
+          // Barlines en los límites de compás (no al principio ni al final)
+          const barlineXs = Array.from({ length: numM - 1 }, (_, i) => START_X + (i + 1) * mw);
+
+          // Lista plana de notas con su posición X calculada y su índice global
+          const flatNotes = measures.flatMap((m, mi) =>
+            m.notes.map((note, ni) => ({
+              note,
+              cx: noteX(mi, m.offsets[ni]),
+              globalIdx: measures.slice(0, mi).reduce((s, mm) => s + mm.notes.length, 0) + ni,
+            }))
+          );
+
+          return (
+            <>
+              {/* Barlines en límites de compás */}
+              {barlineXs.map((bx, bi) => (
+                <line key={`bl-${bi}`} x1={bx} x2={bx} y1={36} y2={84}
+                  stroke={barLineColor} strokeWidth="1" />
+              ))}
+
+              {/* Notas posicionadas dentro de su compás */}
+              {flatNotes.map(({ note, cx, globalIdx }) => {
+                const cy = pitchToY(note.pitch, shift);
+                const isSelected = note.id === selectedNoteId;
+                const isActive   = activeNoteIdx >= 0 && (noteOffset + globalIdx) === activeNoteIdx;
+                const col  = isActive ? '#C8A84B' : isSelected ? selectedNoteColor : defaultNoteColor;
+                const isOpen  = note.duration === 'whole' || note.duration === 'half';
+                const hasStem = note.duration !== 'whole';
+                const stemUp  = cy >= 60;
+                const hasSharp = note.pitch.includes('#');
+                const hasFlat  = note.pitch.includes('b') && note.pitch.length > 2;
+                const ledgers: number[] = [];
+                for (let ly = 96; ly <= cy + 6; ly += 12) ledgers.push(ly);
+                if (cy <= 30) ledgers.push(24);
+                if (cy <= 18) ledgers.push(12);
+                return (
+                  <g key={`imp-${globalIdx}`} className={interactive ? 'cursor-pointer' : ''}
+                    onClick={() => { if (interactive && onSelectNote) { playNote(note.pitch, 0.4, 80); onSelectNote(note); } }}>
+                    {isActive   && <circle cx={cx} cy={cy} r={16} fill="rgba(200,168,75,0.22)" stroke="#C8A84B" strokeWidth="1" />}
+                    {!isActive && isSelected && <circle cx={cx} cy={cy} r={14} fill="rgba(74,158,255,0.15)" />}
+                    {ledgers.map(ly => <line key={ly} x1={cx-10} x2={cx+10} y1={ly} y2={ly} stroke={col} strokeWidth="0.8" />)}
+                    {hasSharp && <text x={cx-14} y={cy+4} fontSize="10" fill={col} fontFamily="serif">♯</text>}
+                    {hasFlat  && <text x={cx-14} y={cy+4} fontSize="10" fill={col} fontFamily="serif">♭</text>}
+                    <ellipse cx={cx} cy={cy} rx={6.5} ry={4.5}
+                      transform={`rotate(-18 ${cx} ${cy})`}
+                      fill={isOpen ? (isDark ? '#131929' : '#FAFAF7') : col}
+                      stroke={col} strokeWidth={isOpen ? '1.8' : '0'}
+                    />
+                    {hasStem && <line x1={stemUp ? cx+6 : cx-6} y1={stemUp ? cy-2 : cy+2}
+                      x2={stemUp ? cx+6 : cx-6} y2={stemUp ? cy-34 : cy+34}
+                      stroke={col} strokeWidth="1.2" />}
+                    {note.duration === 'eighth' && stemUp  && <path d={`M ${cx+6} ${cy-36} Q ${cx+18} ${cy-24} ${cx+10} ${cy-18}`} fill="none" stroke={col} strokeWidth="1.2" />}
+                    {note.duration === 'eighth' && !stemUp && <path d={`M ${cx-6} ${cy+36} Q ${cx-18} ${cy+24} ${cx-10} ${cy+18}`} fill="none" stroke={col} strokeWidth="1.2" />}
+                  </g>
+                );
+              })}
+            </>
+          );
         })()}
 
         {/* MEASURE 4: Whole Note C5 — only shown when no imported notes */}
