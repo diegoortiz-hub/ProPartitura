@@ -24,15 +24,25 @@ interface StaffSVGProps {
   importedNotes?: NoteData[];
 }
 
-// Compute Y coordinate from pitch string (treble clef)
-function pitchToY(pitch: string): number {
+// Compute Y coordinate from pitch string (treble clef, staff lines at 36–84)
+function pitchToY(pitch: string, octaveShift = 0): number {
   const match = pitch.match(/([A-G])[#b]?(\d)/);
   if (!match) return 60;
   const note = match[1];
-  const octave = parseInt(match[2]);
+  const octave = parseInt(match[2]) + octaveShift;
   const STEPS: Record<string, number> = { C:0, D:1, E:2, F:3, G:4, A:5, B:6 };
   const stepsFromC4 = (octave - 4) * 7 + (STEPS[note] ?? 0);
-  return 96 - stepsFromC4 * 6;
+  return Math.max(18, Math.min(120, 96 - stepsFromC4 * 6));
+}
+
+// Auto-shift imported notes by octave so median MIDI lands inside C3–C6 (MIDI 48–84)
+function autoOctaveShift(notes: { midi: number }[]): number {
+  if (!notes.length) return 0;
+  const sorted = [...notes].map(n => n.midi).sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  if (median < 48) return Math.ceil((48 - median) / 12);
+  if (median > 84) return -Math.ceil((median - 84) / 12);
+  return 0;
 }
 
 export const StaffSVG: React.FC<StaffSVGProps> = ({
@@ -73,7 +83,7 @@ export const StaffSVG: React.FC<StaffSVGProps> = ({
 
   return (
     <div className="w-full select-none overflow-x-auto">
-      <svg className="w-full min-w-[800px] h-auto" viewBox="0 0 860 140" xmlns="http://www.w3.org/2000/svg">
+      <svg className="w-full min-w-[800px] h-auto" viewBox="0 0 860 150" xmlns="http://www.w3.org/2000/svg">
         {/* Selection highlight for Measure 1 */}
         {selectedNoteId === 'note-treble-2' && (
           <rect fill="rgba(74, 158, 255, 0.08)" height="72" rx="4" width="180" x="70" y="24" />
@@ -337,15 +347,15 @@ export const StaffSVG: React.FC<StaffSVGProps> = ({
         </>}
         {/* IMPORTED NOTES — dynamic rendering overrides static notes */}
         {importedNotes && importedNotes.length > 0 && (() => {
-          const BEAT_PX = 42;
           const START_X = 84;
+          const END_X = 840;
           const visibleNotes = importedNotes.slice(0, 16);
-          const BEATS: Record<string, number> = { whole:4, half:2, quarter:1, eighth:0.5, sixteenth:0.25 };
-          let cumX = START_X;
+          const shift = autoOctaveShift(visibleNotes);
+          const step = visibleNotes.length > 1 ? (END_X - START_X) / (visibleNotes.length - 1) : 0;
+
           return visibleNotes.map((note, i) => {
-            const cx = Math.min(cumX, 840);
-            const cy = pitchToY(note.pitch);
-            cumX += (BEATS[note.duration] ?? 1) * BEAT_PX;
+            const cx = visibleNotes.length === 1 ? START_X : START_X + i * step;
+            const cy = pitchToY(note.pitch, shift);
             const isSelected = note.id === selectedNoteId;
             const col = isSelected ? selectedNoteColor : defaultNoteColor;
             const isOpen = note.duration === 'whole' || note.duration === 'half';
@@ -353,11 +363,11 @@ export const StaffSVG: React.FC<StaffSVGProps> = ({
             const stemUp = cy >= 60;
             const hasSharp = note.pitch.includes('#');
             const hasFlat = note.pitch.includes('b') && note.pitch.length > 2;
-            // Ledger lines
+            // Ledger lines: every 12px below staff (96, 108, 120) or above (24)
             const ledgers: number[] = [];
-            if (cy >= 90) ledgers.push(96);
-            if (cy >= 102) ledgers.push(108);
+            for (let ly = 96; ly <= cy + 6; ly += 12) ledgers.push(ly);
             if (cy <= 30) ledgers.push(24);
+            if (cy <= 18) ledgers.push(12);
             return (
               <g key={`imp-${i}`} className={interactive ? 'cursor-pointer' : ''} onClick={() => { if (interactive && onSelectNote) { playNote(note.pitch, 0.4, 80); onSelectNote(note); } }}>
                 {isSelected && <circle cx={cx} cy={cy} r={14} fill="rgba(74,158,255,0.15)" />}
