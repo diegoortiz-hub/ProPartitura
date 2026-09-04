@@ -154,7 +154,7 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
               </span>
               <div className="text-center">
                 <p className="text-sm font-medium text-white">
-                  {mode === 'image' ? 'Audiveris está reconociendo la partitura...' : 'Detectando alturas en el audio...'}
+                  {mode === 'image' ? 'Audiveris está reconociendo la partitura...' : 'Basic-Pitch está transcribiendo el audio...'}
                 </p>
                 <p className="text-xs text-slate-400 mt-1 font-mono">{fileName}</p>
               </div>

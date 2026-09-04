@@ -7,9 +7,11 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "postinstall": "node -e \"const fs=require('fs');const src='node_modules/@spotify/basic-pitch/model';const dst='public/basic-pitch-model';if(!fs.existsSync(dst))fs.mkdirSync(dst,{recursive:true});fs.readdirSync(src).forEach(f=>fs.copyFileSync(src+'/'+f,dst+'/'+f));console.log('Basic-Pitch model copiado a public/');\""
   },
   "dependencies": {
+    "@spotify/basic-pitch": "^1.0.1",
     "@tailwindcss/vite": "^4.3.3",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
