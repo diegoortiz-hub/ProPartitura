@@ -7,6 +7,7 @@ import { PlaybackBar } from '../components/PlaybackBar';
 import { ScoreImporter } from '../components/ScoreImporter';
 import { playNote } from '../utils/audio';
 import type { ImportedNote } from '../utils/imageToScore';
+import type { KeySignature } from '../utils/audioToScore';
 
 export const Editor: React.FC = () => {
   const [selectedNote, setSelectedNote] = useState<NoteData>({
@@ -29,6 +30,8 @@ export const Editor: React.FC = () => {
   const [zoomLevel, setZoomLevel] = useState<number>(100);
   const [showImporter, setShowImporter] = useState(false);
   const [importedNotes, setImportedNotes] = useState<NoteData[] | undefined>(undefined);
+  const [importedKeySig, setImportedKeySig]   = useState<KeySignature | undefined>(undefined);
+  const [importedTimeSig, setImportedTimeSig] = useState<string | undefined>(undefined);
 
   const handleSelectNote = (note: NoteData) => {
     setSelectedNote(note);
@@ -43,7 +46,9 @@ export const Editor: React.FC = () => {
     playNote('C4', 0.2, 70);
   };
 
-  const handleImport = (raw: ImportedNote[], _voice?: string) => {
+  const handleImport = (raw: ImportedNote[], _voice?: string, keySig?: KeySignature, timeSig?: string) => {
+    if (keySig)  setImportedKeySig(keySig);
+    if (timeSig) setImportedTimeSig(timeSig);
     const asNoteData: NoteData[] = raw.map((n, i) => ({
       id: `imported-${i}`,
       pitch: n.pitch,
@@ -320,6 +325,8 @@ export const Editor: React.FC = () => {
                   onSelectNote={handleSelectNote}
                   theme={scoreTheme}
                   importedNotes={importedNotes}
+                  keySignature={importedKeySig}
+                  timeSignature={importedTimeSig}
                 />
               </div>
 

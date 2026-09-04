@@ -14,6 +14,8 @@ export interface NoteData {
   articulation?: 'staccato' | 'tenuto' | 'accent' | 'fermata';
 }
 
+interface KeySignature { flats: string[]; sharps: string[] }
+
 interface StaffSVGProps {
   selectedNoteId?: string;
   onSelectNote?: (note: NoteData) => void;
@@ -22,6 +24,8 @@ interface StaffSVGProps {
   measuresCount?: number;
   height?: number;
   importedNotes?: NoteData[];
+  keySignature?: KeySignature;
+  timeSignature?: string;
 }
 
 // Compute Y coordinate from pitch string (treble clef, staff lines at 36–84)
@@ -45,12 +49,18 @@ function autoOctaveShift(notes: { midi: number }[]): number {
   return 0;
 }
 
+// Key signature accidental positions in treble clef (y in viewBox coords)
+const FLAT_Y  = [60, 42, 66, 48, 72, 54, 78]; // Bb Eb Ab Db Gb Cb Fb
+const SHARP_Y = [36, 54, 24, 48, 66, 42, 60]; // F# C# G# D# A# E# B#
+
 export const StaffSVG: React.FC<StaffSVGProps> = ({
   selectedNoteId = 'note-treble-2',
   onSelectNote,
   interactive = true,
   theme = 'dark',
   importedNotes,
+  keySignature,
+  timeSignature,
 }) => {
   const isDark = theme === 'dark';
   const staffLineColor = isDark ? 'rgba(255, 255, 255, 0.22)' : '#45464c';
@@ -108,13 +118,36 @@ export const StaffSVG: React.FC<StaffSVGProps> = ({
           𝄞
         </text>
 
-        {/* Time Signature 4/4 */}
-        <text fill={isDark ? '#E2DDD5' : '#1A1F2E'} fontFamily="'Inter', sans-serif" fontSize="16" fontWeight="700" x="56" y="56">
-          4
-        </text>
-        <text fill={isDark ? '#E2DDD5' : '#1A1F2E'} fontFamily="'Inter', sans-serif" fontSize="16" fontWeight="700" x="56" y="78">
-          4
-        </text>
+        {/* Key Signature (flats / sharps) — only when importedNotes active */}
+        {importedNotes && keySignature && (() => {
+          const accCol = isDark ? '#E2DDD5' : '#1A1F2E';
+          const flats  = keySignature.flats  ?? [];
+          const sharps = keySignature.sharps ?? [];
+          const items  = flats.length > 0 ? flats : sharps;
+          const yArr   = flats.length > 0 ? FLAT_Y : SHARP_Y;
+          const sym    = flats.length > 0 ? '♭' : '♯';
+          return items.map((_, i) => (
+            <text key={i} fill={accCol} fontFamily="serif" fontSize="13" fontWeight="bold"
+              x={54 + i * 9} y={yArr[i] + 5}>
+              {sym}
+            </text>
+          ));
+        })()}
+
+        {/* Time Signature — dynamic when importedNotes active */}
+        {(() => {
+          const numAcc = importedNotes && keySignature
+            ? (keySignature.flats?.length || keySignature.sharps?.length || 0)
+            : 0;
+          const tsX  = 56 + numAcc * 9;
+          const [top, bot] = (importedNotes && timeSignature ? timeSignature : '4/4').split('/');
+          return (
+            <>
+              <text fill={isDark ? '#E2DDD5' : '#1A1F2E'} fontFamily="'Inter', sans-serif" fontSize="16" fontWeight="700" x={tsX} y="56">{top}</text>
+              <text fill={isDark ? '#E2DDD5' : '#1A1F2E'} fontFamily="'Inter', sans-serif" fontSize="16" fontWeight="700" x={tsX} y="78">{bot}</text>
+            </>
+          );
+        })()}
 
         {/* Static K.545 notes — hidden when importedNotes is active */}
         {!importedNotes && <>

@@ -1,9 +1,9 @@
 import React, { useState, useRef } from 'react';
 import { imageToScore, ImportedNote } from '../utils/imageToScore';
-import { audioFileToScore, audioFileToScoreFull, AudioEngine, OrchestraVoice } from '../utils/audioToScore';
+import { audioFileToScore, audioFileToScoreFull, AudioEngine, OrchestraVoice, KeySignature } from '../utils/audioToScore';
 
 interface ScoreImporterProps {
-  onImport: (notes: ImportedNote[], voice?: string) => void;
+  onImport: (notes: ImportedNote[], voice?: string, keySig?: KeySignature, timeSig?: string) => void;
   onClose: () => void;
 }
 
@@ -20,6 +20,10 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
   const [errMsg, setErrMsg]     = useState('');
   const [notes, setNotes]       = useState<ImportedNote[]>([]);
   const [voices, setVoices]     = useState<OrchestraVoice[]>([]);
+  const [keyLabel, setKeyLabel] = useState('');
+  const [keySig, setKeySig]     = useState<KeySignature | null>(null);
+  const [timeSig, setTimeSig]   = useState('');
+  const [detectedTempo, setDetectedTempo] = useState<number | null>(null);
   const [dragOver, setDrag]     = useState(false);
   const [fileName, setFile]     = useState('');
   const [progress, setProgress] = useState(0);
@@ -37,6 +41,10 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
     setProgress(0);
     setProgressMsg('');
     setEngine(null);
+    setKeyLabel('');
+    setKeySig(null);
+    setTimeSig('');
+    setDetectedTempo(null);
   };
 
   const processFile = async (file: File) => {
@@ -60,6 +68,10 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
         if (!res.voices.length) throw new Error('No se detectaron voces en el audio orquestal.');
         setVoices(res.voices);
         setEngine('demucs');
+        if (res.keyLabel)      setKeyLabel(res.keyLabel);
+        if (res.keySignature)  setKeySig(res.keySignature);
+        if (res.timeSignature) setTimeSig(res.timeSignature);
+        if (res.tempo)         setDetectedTempo(res.tempo);
         setProgress(100);
         setStatus('done');
 
@@ -269,13 +281,43 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
           {/* Results — orchestra (multiple voices) */}
           {status === 'done' && voices.length > 0 && (
             <div className="flex flex-col gap-3">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <span className="material-symbols-outlined text-[18px] text-[#2ECC71]">check_circle</span>
                 <span className="text-xs font-bold text-white">{voices.length} voces detectadas</span>
                 <span className="px-2 py-0.5 rounded border text-[10px] font-medium text-purple-400 border-purple-400/40 bg-purple-400/10">
                   Demucs + librosa
                 </span>
               </div>
+
+              {/* Metadatos musicales detectados */}
+              {(keyLabel || timeSig || detectedTempo) && (
+                <div className="bg-[#0C1220] border border-[#C8A84B]/20 rounded-lg p-3 flex flex-wrap gap-3 items-center">
+                  {keyLabel && (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-slate-400 uppercase tracking-wide">Tonalidad</span>
+                      <span className="text-xs font-bold text-[#C8A84B]">{keyLabel}</span>
+                      {keySig && keySig.flats.length > 0 && (
+                        <span className="text-[10px] text-slate-400">({keySig.flats.length}♭)</span>
+                      )}
+                      {keySig && keySig.sharps.length > 0 && (
+                        <span className="text-[10px] text-slate-400">({keySig.sharps.length}♯)</span>
+                      )}
+                    </div>
+                  )}
+                  {timeSig && (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-slate-400 uppercase tracking-wide">Compás</span>
+                      <span className="text-xs font-bold text-white">{timeSig}</span>
+                    </div>
+                  )}
+                  {detectedTempo && (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-slate-400 uppercase tracking-wide">Tempo</span>
+                      <span className="text-xs font-bold text-white">♩= {detectedTempo}</span>
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="flex flex-col gap-2">
                 {voices.map((v, i) => (
@@ -295,7 +337,7 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
                     </div>
                     <button
                       type="button"
-                      onClick={() => { onImport(v.notes, v.voice); onClose(); }}
+                      onClick={() => { onImport(v.notes, v.voice, keySig ?? undefined, timeSig || undefined); onClose(); }}
                       className="shrink-0 px-3 py-1.5 rounded bg-[#C8A84B] hover:bg-[#E2C46A] text-[#0C1220] text-[11px] font-bold cursor-pointer transition-colors flex items-center gap-1"
                     >
                       <span className="material-symbols-outlined text-[14px]">edit_note</span>

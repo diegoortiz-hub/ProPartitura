@@ -10,7 +10,17 @@ export type { ImportedNote };
 export type AudioEngine = 'omnizart' | 'basic-pitch' | 'demucs';
 export interface TranscribeResult  { notes: ImportedNote[]; engine: AudioEngine }
 export interface OrchestraVoice    { voice: string; notes: ImportedNote[] }
-export interface OrchestraResult   { voices: OrchestraVoice[]; engine: 'demucs' }
+export interface KeySignature      { flats: string[]; sharps: string[] }
+export interface OrchestraResult   {
+  voices: OrchestraVoice[];
+  engine: 'demucs';
+  key?: string;
+  mode?: string;
+  keyLabel?: string;
+  keySignature?: KeySignature;
+  timeSignature?: string;
+  tempo?: number;
+}
 
 // ─── Configuración ───────────────────────────────────────────────────────────
 
@@ -177,7 +187,7 @@ export async function audioFileToScoreFull(
     throw new Error('El backend Python no está disponible. Arranca backend-py/server.py primero.');
   }
 
-  onProgress?.('Separando fuentes con Demucs...');
+  onProgress?.('Recortando a 60 s y separando fuentes con Demucs...');
   const form = new FormData();
   form.append('file', file);
 
