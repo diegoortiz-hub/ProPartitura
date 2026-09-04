@@ -43,7 +43,7 @@ export const Editor: React.FC = () => {
     playNote('C4', 0.2, 70);
   };
 
-  const handleImport = (raw: ImportedNote[]) => {
+  const handleImport = (raw: ImportedNote[], _voice?: string) => {
     const asNoteData: NoteData[] = raw.map((n, i) => ({
       id: `imported-${i}`,
       pitch: n.pitch,

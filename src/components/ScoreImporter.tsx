@@ -1,13 +1,13 @@
 import React, { useState, useRef } from 'react';
 import { imageToScore, ImportedNote } from '../utils/imageToScore';
-import { audioFileToScore, AudioEngine } from '../utils/audioToScore';
+import { audioFileToScore, audioFileToScoreFull, AudioEngine, OrchestraVoice } from '../utils/audioToScore';
 
 interface ScoreImporterProps {
-  onImport: (notes: ImportedNote[]) => void;
+  onImport: (notes: ImportedNote[], voice?: string) => void;
   onClose: () => void;
 }
 
-type Mode = 'image' | 'audio';
+type Mode = 'image' | 'audio' | 'orchestra';
 type Status = 'idle' | 'analyzing' | 'done' | 'error';
 
 const DURATION_ICON: Record<string, string> = {
@@ -15,23 +15,27 @@ const DURATION_ICON: Record<string, string> = {
 };
 
 export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose }) => {
-  const [mode, setMode]       = useState<Mode>('image');
-  const [status, setStatus]   = useState<Status>('idle');
-  const [errMsg, setErrMsg]   = useState('');
-  const [notes, setNotes]     = useState<ImportedNote[]>([]);
-  const [dragOver, setDrag]   = useState(false);
-  const [fileName, setFile]   = useState('');
+  const [mode, setMode]         = useState<Mode>('image');
+  const [status, setStatus]     = useState<Status>('idle');
+  const [errMsg, setErrMsg]     = useState('');
+  const [notes, setNotes]       = useState<ImportedNote[]>([]);
+  const [voices, setVoices]     = useState<OrchestraVoice[]>([]);
+  const [dragOver, setDrag]     = useState(false);
+  const [fileName, setFile]     = useState('');
   const [progress, setProgress] = useState(0);
-  const [engine, setEngine]   = useState<AudioEngine | null>(null);
+  const [progressMsg, setProgressMsg] = useState('');
+  const [engine, setEngine]     = useState<AudioEngine | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const reset = (newMode?: Mode) => {
     if (newMode) setMode(newMode);
     setStatus('idle');
     setNotes([]);
+    setVoices([]);
     setErrMsg('');
     setFile('');
     setProgress(0);
+    setProgressMsg('');
     setEngine(null);
   };
 
@@ -43,27 +47,33 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
     setEngine(null);
 
     try {
-      let result: ImportedNote[];
-
       if (mode === 'image') {
-        result = await imageToScore(file);
+        const result = await imageToScore(file);
+        if (!result.length) throw new Error('No se detectaron notas. Prueba con una imagen más nítida.');
+        setNotes(result);
+        setProgress(100);
+        setStatus('done');
+
+      } else if (mode === 'orchestra') {
+        setProgressMsg('Iniciando Demucs...');
+        const res = await audioFileToScoreFull(file, 120, (msg) => setProgressMsg(msg));
+        if (!res.voices.length) throw new Error('No se detectaron voces en el audio orquestal.');
+        setVoices(res.voices);
+        setEngine('demucs');
+        setProgress(100);
+        setStatus('done');
+
       } else {
         const res = await audioFileToScore(file, 120, (eng, pct) => {
           setEngine(eng);
           setProgress(pct);
         });
-        result = res.notes;
+        if (!res.notes.length) throw new Error('No se detectaron notas. Prueba con un audio más limpio.');
+        setNotes(res.notes);
         setEngine(res.engine);
+        setProgress(100);
+        setStatus('done');
       }
-
-      if (!result.length) {
-        setErrMsg('No se detectaron notas. Prueba con un audio más limpio o una imagen más nítida.');
-        setStatus('error');
-        return;
-      }
-      setNotes(result);
-      setProgress(100);
-      setStatus('done');
     } catch (e) {
       setErrMsg(e instanceof Error ? e.message : 'Error desconocido.');
       setStatus('error');
@@ -84,10 +94,12 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
   const engineLabel: Record<AudioEngine, string> = {
     omnizart: 'Omnizart',
     'basic-pitch': 'Basic-Pitch',
+    demucs: 'Demucs + librosa',
   };
   const engineColor: Record<AudioEngine, string> = {
     omnizart: 'text-[#2ECC71] border-[#2ECC71]/40 bg-[#2ECC71]/10',
     'basic-pitch': 'text-[#4A9EFF] border-[#4A9EFF]/40 bg-[#4A9EFF]/10',
+    demucs: 'text-purple-400 border-purple-400/40 bg-purple-400/10',
   };
 
   return (
@@ -111,15 +123,19 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
         <div className="p-6 flex flex-col gap-5">
           {/* Mode toggle */}
           <div className="flex bg-[#0C1220] rounded-lg p-1 gap-1 border border-[#1A2235]">
-            {(['image', 'audio'] as Mode[]).map(m => (
+            {([
+              { id: 'image', icon: 'add_photo_alternate', label: 'Imagen' },
+              { id: 'audio', icon: 'audiotrack', label: 'Audio' },
+              { id: 'orchestra', icon: 'queue_music', label: 'Orquestal' },
+            ] as { id: Mode; icon: string; label: string }[]).map(m => (
               <button
-                key={m} type="button" onClick={() => reset(m)}
-                className={`flex-1 py-2 rounded-[6px] text-xs font-semibold flex items-center justify-center gap-2 transition-colors ${
-                  mode === m ? 'bg-[#1A2235] text-[#C8A84B]' : 'text-slate-400 hover:text-white'
+                key={m.id} type="button" onClick={() => reset(m.id)}
+                className={`flex-1 py-2 rounded-[6px] text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors ${
+                  mode === m.id ? 'bg-[#1A2235] text-[#C8A84B]' : 'text-slate-400 hover:text-white'
                 }`}
               >
-                <span className="material-symbols-outlined text-[18px]">{m === 'image' ? 'add_photo_alternate' : 'audiotrack'}</span>
-                {m === 'image' ? 'Imagen de partitura' : 'Canción / audio'}
+                <span className="material-symbols-outlined text-[16px]">{m.icon}</span>
+                {m.label}
               </button>
             ))}
           </div>
@@ -136,16 +152,20 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
               }`}
             >
               <span className={`material-symbols-outlined text-[44px] ${dragOver ? 'text-[#C8A84B]' : 'text-slate-500'}`}>
-                {mode === 'image' ? 'add_photo_alternate' : 'audio_file'}
+                {mode === 'image' ? 'add_photo_alternate' : mode === 'orchestra' ? 'queue_music' : 'audio_file'}
               </span>
               <div className="text-center">
                 <p className="text-sm font-medium text-white">
-                  {mode === 'image' ? 'Arrastra la foto de la partitura aquí' : 'Arrastra la canción aquí'}
+                  {mode === 'image' ? 'Arrastra la foto de la partitura aquí'
+                    : mode === 'orchestra' ? 'Arrastra la pieza orquestal aquí'
+                    : 'Arrastra la canción aquí'}
                 </p>
                 <p className="text-xs text-slate-400 mt-1">
                   {mode === 'image'
                     ? 'PNG, JPG, WEBP — foto o escaneo de partitura impresa'
-                    : 'MP3, WAV, M4A, OGG — máx. 30 segundos analizados'}
+                    : mode === 'orchestra'
+                      ? 'WAV, MP3 — Demucs separa voces (melody, bajo). Requiere backend Python.'
+                      : 'MP3, WAV, M4A, OGG — máx. 30 segundos analizados'}
                 </p>
               </div>
               <input
@@ -168,14 +188,16 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
                 <p className="text-sm font-medium text-white">
                   {mode === 'image'
                     ? 'Audiveris está reconociendo la partitura...'
-                    : engine
-                      ? `${engineLabel[engine]} transcribiendo...`
-                      : 'Detectando motor disponible...'}
+                    : mode === 'orchestra'
+                      ? (progressMsg || 'Iniciando Demucs...')
+                      : engine
+                        ? `${engineLabel[engine]} transcribiendo...`
+                        : 'Detectando motor disponible...'}
                 </p>
                 <p className="text-xs text-slate-400 mt-1 font-mono">{fileName}</p>
 
-                {/* Progress bar — solo para audio */}
-                {mode === 'audio' && (
+                {/* Progress bar — solo para audio / orchestra */}
+                {(mode === 'audio' || mode === 'orchestra') && (
                   <div className="mt-4 w-full">
                     <div className="flex items-center justify-between text-[10px] text-slate-500 mb-1">
                       {engine && (
@@ -183,12 +205,12 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
                           {engineLabel[engine]}
                         </span>
                       )}
-                      <span className="ml-auto font-mono">{progress}%</span>
+                      {mode === 'audio' && <span className="ml-auto font-mono">{progress}%</span>}
                     </div>
                     <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
                       <div
-                        className="h-full bg-[#C8A84B] rounded-full transition-all duration-300"
-                        style={{ width: `${progress}%` }}
+                        className={`h-full rounded-full transition-all duration-300 ${mode === 'orchestra' ? 'bg-purple-500 animate-pulse w-full' : 'bg-[#C8A84B]'}`}
+                        style={mode === 'audio' ? { width: `${progress}%` } : undefined}
                       />
                     </div>
                   </div>
@@ -213,7 +235,7 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
             </div>
           )}
 
-          {/* Results */}
+          {/* Results — single voice (image / audio) */}
           {status === 'done' && notes.length > 0 && (
             <div className="flex flex-col gap-3">
               <div className="flex items-center justify-between">
@@ -243,6 +265,51 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
               </p>
             </div>
           )}
+
+          {/* Results — orchestra (multiple voices) */}
+          {status === 'done' && voices.length > 0 && (
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-[18px] text-[#2ECC71]">check_circle</span>
+                <span className="text-xs font-bold text-white">{voices.length} voces detectadas</span>
+                <span className="px-2 py-0.5 rounded border text-[10px] font-medium text-purple-400 border-purple-400/40 bg-purple-400/10">
+                  Demucs + librosa
+                </span>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                {voices.map((v, i) => (
+                  <div key={i} className="bg-[#0C1220] border border-slate-800 rounded-lg p-3 flex items-center justify-between gap-3">
+                    <div className="flex flex-col gap-1 min-w-0">
+                      <span className="text-xs font-semibold text-white">{v.voice}</span>
+                      <div className="flex flex-wrap gap-1 max-h-12 overflow-hidden">
+                        {v.notes.slice(0, 8).map((n, j) => (
+                          <span key={j} className="px-1.5 py-0.5 rounded bg-[#1A2235] text-[10px] font-mono text-slate-300">
+                            {n.pitch}
+                          </span>
+                        ))}
+                        {v.notes.length > 8 && (
+                          <span className="text-[10px] text-slate-500">+{v.notes.length - 8} más</span>
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => { onImport(v.notes, v.voice); onClose(); }}
+                      className="shrink-0 px-3 py-1.5 rounded bg-[#C8A84B] hover:bg-[#E2C46A] text-[#0C1220] text-[11px] font-bold cursor-pointer transition-colors flex items-center gap-1"
+                    >
+                      <span className="material-symbols-outlined text-[14px]">edit_note</span>
+                      Cargar
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <p className="text-[11px] text-slate-400">
+                Elige qué voz cargar en el editor. Puedes importar cada una por separado.
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Footer */}
@@ -250,7 +317,7 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
           <button type="button" onClick={onClose} className="px-4 py-2 rounded bg-[#1A2235] hover:bg-[#212D44] text-white text-xs font-medium cursor-pointer transition-colors">
             Cancelar
           </button>
-          {status === 'done' && (
+          {status === 'done' && notes.length > 0 && (
             <button
               type="button"
               onClick={() => { onImport(notes); onClose(); }}

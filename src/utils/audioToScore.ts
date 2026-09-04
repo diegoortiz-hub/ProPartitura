@@ -7,8 +7,10 @@ import {
 import type { ImportedNote } from './imageToScore';
 
 export type { ImportedNote };
-export type AudioEngine = 'omnizart' | 'basic-pitch';
-export interface TranscribeResult { notes: ImportedNote[]; engine: AudioEngine }
+export type AudioEngine = 'omnizart' | 'basic-pitch' | 'demucs';
+export interface TranscribeResult  { notes: ImportedNote[]; engine: AudioEngine }
+export interface OrchestraVoice    { voice: string; notes: ImportedNote[] }
+export interface OrchestraResult   { voices: OrchestraVoice[]; engine: 'demucs' }
 
 // ─── Configuración ───────────────────────────────────────────────────────────
 
@@ -161,4 +163,35 @@ export async function audioFileToScore(
     (p) => onProgress?.('basic-pitch', p)
   );
   return { notes, engine: 'basic-pitch' };
+}
+
+// ─── Transcripción orquestal con Demucs ──────────────────────────────────────
+
+export async function audioFileToScoreFull(
+  file: File,
+  bpm = 120,
+  onProgress?: (msg: string) => void,
+): Promise<OrchestraResult> {
+  const available = await omnizartAvailable();
+  if (!available) {
+    throw new Error('El backend Python no está disponible. Arranca backend-py/server.py primero.');
+  }
+
+  onProgress?.('Separando fuentes con Demucs...');
+  const form = new FormData();
+  form.append('file', file);
+
+  const res = await fetch(`${OMNIZART_URL}/api/audio-omr-full?bpm=${bpm}`, {
+    method: 'POST',
+    body: form,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail ?? `Error ${res.status} del servidor`);
+  }
+
+  onProgress?.('Transcribiendo cada voz...');
+  const data = await res.json();
+  return data as OrchestraResult;
 }
