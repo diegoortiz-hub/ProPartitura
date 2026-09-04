@@ -1,66 +1,99 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { playNote } from '../utils/audio';
 
+interface NoteData {
+  pitch: string;
+  duration: 'whole' | 'half' | 'quarter' | 'eighth' | 'sixteenth';
+  midi: number;
+}
+
 interface PlaybackBarProps {
   tempo?: number;
   totalSeconds?: number;
+  importedNotes?: NoteData[];
 }
+
+const DURATION_SEC: Record<string, number> = {
+  whole: 2, half: 1, quarter: 0.5, eighth: 0.25, sixteenth: 0.125,
+};
+
+const DEFAULT_MOTIF = ['C4','E4','G4','C5','E5','D5','C5','B4','A4','G4'];
 
 export const PlaybackBar: React.FC<PlaybackBarProps> = ({
   tempo = 120,
-  totalSeconds = 225, // 03:45
+  totalSeconds = 225,
+  importedNotes,
 }) => {
   const [isPlaying, setIsPlaying] = useState(false);
-  const [currentSeconds, setCurrentSeconds] = useState(12);
+  const [currentSeconds, setCurrentSeconds] = useState(0);
   const [volume, setVolume] = useState(80);
-  const [measureCounter, setMeasureCounter] = useState('004.1.0');
-  const timerRef = useRef<number | null>(null);
+  const [measureCounter, setMeasureCounter] = useState('001.1.0');
+  const timerRef   = useRef<number | null>(null);
+  const timeoutRef = useRef<number | null>(null);
   const noteIndexRef = useRef(0);
 
-  // Sonata Facsimile notes to play along during playback
-  const playbackMotif = ['C4', 'E4', 'G4', 'B4', 'C5', 'D5', 'E5', 'G5', 'E5', 'D5', 'C5', 'G4'];
+  const stopAll = () => {
+    if (timerRef.current)   { clearInterval(timerRef.current);  timerRef.current   = null; }
+    if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+  };
+
+  // Reproduce notas importadas en secuencia con tiempos reales
+  const playImportedSequence = (notes: NoteData[], vol: number) => {
+    let elapsed = 0;
+    notes.forEach((n, i) => {
+      const bps = tempo / 60;
+      const durSec = (DURATION_SEC[n.duration] ?? 0.5) / bps * 2;
+      timeoutRef.current = window.setTimeout(() => {
+        playNote(n.pitch, durSec * 0.9, (vol / 100) * 90);
+        noteIndexRef.current = i;
+        setCurrentSeconds(parseFloat(elapsed.toFixed(1)));
+        const measure = Math.floor(i / 4) + 1;
+        const beat    = (i % 4) + 1;
+        setMeasureCounter(`${measure.toString().padStart(3,'0')}.${beat}.0`);
+        if (i === notes.length - 1) {
+          setIsPlaying(false);
+          noteIndexRef.current = 0;
+        }
+      }, elapsed * 1000);
+      elapsed += durSec;
+    });
+  };
 
   useEffect(() => {
     if (isPlaying) {
-      const intervalMs = (60 / tempo) * 500; // 8th note speed
-      timerRef.current = window.setInterval(() => {
-        // Play audio note
-        const note = playbackMotif[noteIndexRef.current % playbackMotif.length];
-        playNote(note, 0.35, (volume / 100) * 90);
-        noteIndexRef.current += 1;
-
-        setCurrentSeconds((prev) => {
-          const next = prev + 1;
-          const measure = Math.floor(next / 4) + 1;
-          const beat = (next % 4) + 1;
-          const formattedM = measure.toString().padStart(3, '0');
-          setMeasureCounter(`${formattedM}.${beat}.0`);
-          if (next >= totalSeconds) {
-            setIsPlaying(false);
-            return 0;
-          }
-          return next;
-        });
-      }, intervalMs);
+      if (importedNotes?.length) {
+        // Reproducción real de notas importadas
+        playImportedSequence(importedNotes, volume);
+      } else {
+        // Motivo de demostración
+        const intervalMs = (60 / tempo) * 500;
+        timerRef.current = window.setInterval(() => {
+          const note = DEFAULT_MOTIF[noteIndexRef.current % DEFAULT_MOTIF.length];
+          playNote(note, 0.35, (volume / 100) * 90);
+          noteIndexRef.current += 1;
+          setCurrentSeconds(prev => {
+            const next = prev + 1;
+            const measure = Math.floor(next / 4) + 1;
+            const beat    = (next % 4) + 1;
+            setMeasureCounter(`${measure.toString().padStart(3,'0')}.${beat}.0`);
+            if (next >= totalSeconds) { setIsPlaying(false); return 0; }
+            return next;
+          });
+        }, intervalMs);
+      }
     } else {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
+      stopAll();
     }
-
-    return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-      }
-    };
-  }, [isPlaying, tempo, volume, totalSeconds]);
+    return stopAll;
+  }, [isPlaying, tempo, volume, totalSeconds, importedNotes]);
 
   const handlePlayPause = () => {
     setIsPlaying(!isPlaying);
   };
 
   const handleRewind = () => {
+    stopAll();
+    setIsPlaying(false);
     setCurrentSeconds(0);
     setMeasureCounter('001.1.0');
     noteIndexRef.current = 0;

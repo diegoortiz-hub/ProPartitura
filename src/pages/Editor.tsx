@@ -349,7 +349,7 @@ export const Editor: React.FC = () => {
         </div>
 
         {/* Bottom Playback Bar */}
-        <PlaybackBar tempo={120} totalSeconds={225} />
+        <PlaybackBar tempo={120} totalSeconds={225} importedNotes={importedNotes} />
       </div>
 
       {showImporter && (
