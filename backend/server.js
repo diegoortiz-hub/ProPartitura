@@ -14,9 +14,27 @@ app.use(cors());
 
 const upload = multer({ dest: os.tmpdir() });
 
-const AUDIVERIS_JAR = process.env.AUDIVERIS_JAR || path.join(__dirname, 'Audiveris.jar');
-const JAVA_BIN      = process.env.JAVA_BIN      || 'java';
-const PORT          = process.env.PORT           || 3001;
+// Audiveris puede invocarse como JAR (legacy) o como app instalada (v5.x)
+const AUDIVERIS_JAR  = process.env.AUDIVERIS_JAR  || path.join(__dirname, 'Audiveris.jar');
+const AUDIVERIS_HOME = process.env.AUDIVERIS_HOME || path.join(__dirname, 'audiveris');
+const AUDIVERIS_BAT  = path.join(AUDIVERIS_HOME, 'bin', 'Audiveris.bat');
+const JAVA_BIN       = process.env.JAVA_BIN       || 'java';
+const PORT           = process.env.PORT            || 3001;
+
+// Elige el modo de invocación disponible
+function getAudiverisCmd(tmpDir, imgPath) {
+  if (fs.existsSync(AUDIVERIS_BAT)) {
+    return `"${AUDIVERIS_BAT}" -batch -export -output "${tmpDir}" "${imgPath}"`;
+  }
+  if (fs.existsSync(AUDIVERIS_JAR)) {
+    return `"${JAVA_BIN}" -jar "${AUDIVERIS_JAR}" -batch -export -output "${tmpDir}" "${imgPath}"`;
+  }
+  return null;
+}
+
+function audiverisAvailable() {
+  return fs.existsSync(AUDIVERIS_BAT) || fs.existsSync(AUDIVERIS_JAR);
+}
 
 // step name → semitone offset within octave
 const STEP_SEMI = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
@@ -69,17 +87,18 @@ function parseMusicXml(xml) {
 app.post('/api/omr', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No se recibió imagen.' });
 
-  if (!fs.existsSync(AUDIVERIS_JAR)) {
+  const cmd = getAudiverisCmd('__TMP__', req.file.path);
+  if (!cmd) {
     fs.unlinkSync(req.file.path);
-    return res.status(500).json({
-      error: `Audiveris no encontrado en: ${AUDIVERIS_JAR}\nDescárgalo de https://github.com/Audiveris/audiveris/releases y configura AUDIVERIS_JAR en backend/.env`,
+    return res.status(503).json({
+      error: 'Audiveris no está instalado. Instala Java 21 y descarga Audiveris desde https://github.com/Audiveris/audiveris/releases. Extrae en backend/audiveris/ o configura AUDIVERIS_JAR en backend/.env',
     });
   }
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'propart-omr-'));
   try {
     execSync(
-      `"${JAVA_BIN}" -jar "${AUDIVERIS_JAR}" -batch -export -output "${tmpDir}" "${req.file.path}"`,
+      getAudiverisCmd(tmpDir, req.file.path),
       { timeout: 90_000, stdio: 'pipe' }
     );
 
@@ -105,14 +124,20 @@ app.post('/api/omr', upload.single('file'), (req, res) => {
 });
 
 app.get('/api/health', (_req, res) => {
+  const batFound = fs.existsSync(AUDIVERIS_BAT);
+  const jarFound = fs.existsSync(AUDIVERIS_JAR);
   res.json({
     status: 'ok',
+    audiverisFound: batFound || jarFound,
+    mode: batFound ? 'app' : jarFound ? 'jar' : 'none',
+    audiverisBat: AUDIVERIS_BAT,
     audiverisJar: AUDIVERIS_JAR,
-    audiverisFound: fs.existsSync(AUDIVERIS_JAR),
   });
 });
 
 app.listen(PORT, () => {
   console.log(`OMR server en http://localhost:${PORT}`);
-  console.log(`Audiveris JAR: ${AUDIVERIS_JAR} — ${fs.existsSync(AUDIVERIS_JAR) ? '✓ encontrado' : '✗ NO encontrado'}`);
+  if (fs.existsSync(AUDIVERIS_BAT))  console.log(`Audiveris app: ${AUDIVERIS_BAT} ✓`);
+  else if (fs.existsSync(AUDIVERIS_JAR)) console.log(`Audiveris JAR: ${AUDIVERIS_JAR} ✓`);
+  else console.log('Audiveris: NO encontrado. Descarga desde https://github.com/Audiveris/audiveris/releases');
 });
