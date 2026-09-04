@@ -7,23 +7,63 @@ import {
 import type { ImportedNote } from './imageToScore';
 
 export type { ImportedNote };
+export type AudioEngine = 'omnizart' | 'basic-pitch';
+export interface TranscribeResult { notes: ImportedNote[]; engine: AudioEngine }
 
-const MODEL_URL = '/basic-pitch-model/model.json';
-const TARGET_SR  = 22050;
+// ─── Configuración ───────────────────────────────────────────────────────────
+
+const OMNIZART_URL = import.meta.env.VITE_OMNIZART_URL ?? 'http://localhost:3002';
+const MODEL_URL    = '/basic-pitch-model/model.json';
+const TARGET_SR    = 22050;
+const MAX_AUDIO_SEC = 30; // limita el audio para no colgar el browser
+
+// ─── Motor 1: Omnizart ───────────────────────────────────────────────────────
+
+async function omnizartAvailable(): Promise<boolean> {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 2_000);
+    const res = await fetch(`${OMNIZART_URL}/api/health`, { signal: ctrl.signal });
+    clearTimeout(t);
+    const json = await res.json();
+    return !!json.omnizart;
+  } catch {
+    return false;
+  }
+}
+
+async function transcribeWithOmnizart(file: File, bpm: number): Promise<ImportedNote[]> {
+  const form = new FormData();
+  form.append('file', file);
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 60_000);
+  try {
+    const res = await fetch(`${OMNIZART_URL}/api/audio-omr?bpm=${bpm}`, {
+      method: 'POST', body: form, signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail ?? `HTTP ${res.status}`);
+    }
+    const { notes } = await res.json();
+    return notes as ImportedNote[];
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// ─── Motor 2: Basic-Pitch ────────────────────────────────────────────────────
 
 let cachedModel: BasicPitch | null = null;
-
-async function getModel(): Promise<BasicPitch> {
+async function getModel() {
   if (!cachedModel) cachedModel = new BasicPitch(MODEL_URL);
   return cachedModel;
 }
 
-async function resampleTo22050(buffer: AudioBuffer): Promise<Float32Array> {
-  const offlineCtx = new OfflineAudioContext(
-    1,
-    Math.ceil(buffer.duration * TARGET_SR),
-    TARGET_SR
-  );
+async function resampleTo22050(buffer: AudioBuffer, maxSec = MAX_AUDIO_SEC): Promise<Float32Array> {
+  const duration = Math.min(buffer.duration, maxSec);
+  const frames   = Math.ceil(duration * TARGET_SR);
+  const offlineCtx = new OfflineAudioContext(1, frames, TARGET_SR);
   const source = offlineCtx.createBufferSource();
   source.buffer = buffer;
   source.connect(offlineCtx.destination);
@@ -32,34 +72,39 @@ async function resampleTo22050(buffer: AudioBuffer): Promise<Float32Array> {
   return rendered.getChannelData(0);
 }
 
-function midiToPitch(midi: number): string {
-  const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-  const octave = Math.floor(midi / 12) - 1;
-  return `${NOTES[midi % 12]}${octave}`;
+const PITCH_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+function midiToPitch(midi: number) {
+  return `${PITCH_NAMES[midi % 12]}${Math.floor(midi / 12) - 1}`;
 }
-
-function secondsToDuration(secs: number, bpm: number): ImportedNote['duration'] {
-  const beats = secs * (bpm / 60);
-  if (beats >= 3.5)  return 'whole';
-  if (beats >= 1.75) return 'half';
-  if (beats >= 0.875) return 'quarter';
-  if (beats >= 0.4)  return 'eighth';
+function secsToDuration(secs: number, bpm: number): ImportedNote['duration'] {
+  const b = secs * (bpm / 60);
+  if (b >= 3.5)   return 'whole';
+  if (b >= 1.75)  return 'half';
+  if (b >= 0.875) return 'quarter';
+  if (b >= 0.4)   return 'eighth';
   return 'sixteenth';
 }
 
-export async function audioFileToScore(file: File, bpm = 120): Promise<ImportedNote[]> {
+async function transcribeWithBasicPitch(
+  file: File,
+  bpm: number,
+  onProgress?: (p: number) => void
+): Promise<ImportedNote[]> {
   const ctx = new AudioContext();
   const arrayBuffer = await file.arrayBuffer();
-
   let audioBuffer: AudioBuffer;
   try {
     audioBuffer = await ctx.decodeAudioData(arrayBuffer);
   } catch {
-    throw new Error('No se pudo decodificar el archivo. Formatos soportados: WAV, MP3, OGG, M4A.');
+    throw new Error('No se pudo decodificar el archivo. Formatos: WAV, MP3, OGG, M4A.');
   }
 
+  onProgress?.(10);
   const resampled = await resampleTo22050(audioBuffer);
+  onProgress?.(25);
+
   const model = await getModel();
+  onProgress?.(40);
 
   const frames: number[][] = [];
   const onsets: number[][] = [];
@@ -67,13 +112,10 @@ export async function audioFileToScore(file: File, bpm = 120): Promise<ImportedN
 
   await model.evaluateModel(
     resampled,
-    (f, o, c) => {
-      frames.push(...f);
-      onsets.push(...o);
-      contours.push(...c);
-    },
-    () => {}
+    (f, o, c) => { frames.push(...f); onsets.push(...o); contours.push(...c); },
+    (p) => onProgress?.(40 + Math.round(p * 50))
   );
+  onProgress?.(95);
 
   const rawNotes = noteFramesToTime(
     addPitchBendsToNoteEvents(
@@ -82,12 +124,41 @@ export async function audioFileToScore(file: File, bpm = 120): Promise<ImportedN
     )
   );
 
+  onProgress?.(100);
   return rawNotes
     .filter(n => n.amplitude > 0.1)
     .slice(0, 32)
     .map(n => ({
       pitch: midiToPitch(n.pitchMidi),
-      duration: secondsToDuration(n.durationSeconds, bpm),
+      duration: secsToDuration(n.durationSeconds, bpm),
       midi: n.pitchMidi,
     }));
+}
+
+// ─── API pública ─────────────────────────────────────────────────────────────
+
+export async function audioFileToScore(
+  file: File,
+  bpm = 120,
+  onProgress?: (engine: AudioEngine, pct: number) => void
+): Promise<TranscribeResult> {
+  const hasOmnizart = await omnizartAvailable();
+
+  if (hasOmnizart) {
+    onProgress?.('omnizart', 0);
+    try {
+      const notes = await transcribeWithOmnizart(file, bpm);
+      onProgress?.('omnizart', 100);
+      return { notes, engine: 'omnizart' };
+    } catch (e) {
+      console.warn('[OMR] Omnizart falló, usando Basic-Pitch:', e);
+    }
+  }
+
+  onProgress?.('basic-pitch', 0);
+  const notes = await transcribeWithBasicPitch(
+    file, bpm,
+    (p) => onProgress?.('basic-pitch', p)
+  );
+  return { notes, engine: 'basic-pitch' };
 }
