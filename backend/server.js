@@ -148,8 +148,11 @@ app.post('/api/omr', upload.single('file'), async (req, res) => {
   // Audiveris needs thick, clear staff lines to detect staves
   const tmpDir = fs.mkdtempSync(path.join(LOCAL_TMP, 'omr-'));
   const imgPath = path.join(tmpDir, 'score_processed.png');
+  let srcW = 0, srcH = 0;
   try {
     const meta = await sharp(rawPath).metadata();
+    srcW = meta.width || 0;
+    srcH = meta.height || 0;
     const w = meta.width || 1000;
     // Scale to at least 2400px wide — Audiveris needs thick, visible staff lines
     const targetW = Math.max(w, 2400);
@@ -172,6 +175,19 @@ app.post('/api/omr', upload.single('file'), async (req, res) => {
       const combined = (proc.stdout || '') + '\n' + (proc.stderr || '');
       console.log('[Audiveris]', combined.slice(-1000));
       if (proc.status !== 0) {
+        // "No regularly spaced lines found" = Audiveris no ve pentagramas.
+        // Casi siempre es una imagen demasiado pequeña o de baja resolución.
+        if (combined.includes('No regularly spaced lines found')) {
+          const dim = srcW && srcH ? ` (la tuya es ${srcW}×${srcH} px)` : '';
+          throw new Error(
+            `No se detectaron pentagramas en la imagen${dim}. ` +
+            'Usa una foto o escaneo donde las 5 líneas del pentagrama se vean nítidas y horizontales. ' +
+            'Recomendado: al menos 1000 px de ancho, buena iluminación y sin inclinación.'
+          );
+        }
+        if (combined.includes('No installed OCR languages')) {
+          console.warn('[Audiveris] OCR sin idiomas instalados — no afecta la detección de notas');
+        }
         const warnLines = combined.split('\n')
           .filter(l => l.includes('WARN') || l.includes('Exception') || l.includes('Error'))
           .join('\n').slice(-800);

@@ -11,6 +11,7 @@ Capa 6: Salida       — { notes, key, mode, keySignature, timeSignature, tempo 
 import os
 import tempfile
 import subprocess
+import threading
 import numpy as np
 import librosa
 import soundfile as sf
@@ -24,6 +25,43 @@ app.add_middleware(
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
+
+# ─── Modelo MT3 en memoria ───────────────────────────────────────────────────
+# Cargar el checkpoint de 175 MB tarda ~43 s; la inferencia solo ~1 s.
+# Se carga una vez al arrancar (en background) y se reutiliza en cada petición.
+_mt3_model = None
+_mt3_error: str | None = None
+_mt3_lock = threading.Lock()
+
+
+def get_mt3_model():
+    """Devuelve el modelo MR-MT3 cargado, cargándolo si hace falta."""
+    global _mt3_model, _mt3_error
+    if _mt3_model is not None:
+        return _mt3_model
+    with _mt3_lock:
+        if _mt3_model is not None:
+            return _mt3_model
+        try:
+            import mt3_infer
+            _mt3_model = mt3_infer.load_model("mr_mt3", device="cpu", cache=True)
+            _mt3_error = None
+        except Exception as e:
+            _mt3_error = f"{type(e).__name__}: {e}"
+            raise
+    return _mt3_model
+
+
+@app.on_event("startup")
+def _warm_mt3():
+    """Precarga MR-MT3 en background para que la primera petición no tarde 60 s."""
+    def _load():
+        try:
+            get_mt3_model()
+            print("[MT3] modelo MR-MT3 listo en memoria")
+        except Exception as e:
+            print(f"[MT3] fallo al precargar: {e}")
+    threading.Thread(target=_load, daemon=True).start()
 
 PYTHON     = os.path.join(os.path.dirname(__file__), ".venv", "Scripts", "python.exe")
 NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
@@ -303,11 +341,8 @@ def _midi_to_notes_music21(midi_path: str, max_notes: int = 64) -> list:
 async def mt3_transcribe(file: UploadFile = File(...)):
     """
     Transcripción con MR-MT3 (176 MB, Multi-instrument).
-    Primer uso descarga el checkpoint desde HuggingFace.
-    CPU: ~10-30x real-time; GPU: 57x real-time.
+    El modelo se precarga al arrancar; la inferencia tarda ~1 s por 4 s de audio.
     """
-    import mt3_infer
-
     suffix  = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
     content = await file.read()
 
@@ -332,10 +367,8 @@ async def mt3_transcribe(file: UploadFile = File(...)):
             tempo = 120
 
         try:
-            midi_file = mt3_infer.transcribe(
-                y, model="mr_mt3", sr=16000,
-                device="cpu", auto_download=True,
-            )
+            model = get_mt3_model()          # cacheado en memoria
+            midi_file = model.transcribe(y, sr=16000)
             midi_file.save(midi_path)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error MT3: {e}")
@@ -414,10 +447,21 @@ def health():
         mt3_ok = True
     except ImportError:
         mt3_ok = False
+    # piano_transcription solo sirve si su checkpoint ya está descargado;
+    # si falta, el frontend debe saltarse ese motor en vez de recibir un 500.
+    pt_ckpt = os.path.join(
+        os.path.expanduser("~"),
+        "piano_transcription_inference_data",
+        "note_F1=0.9677_pedal_F1=0.9186.pth",
+    )
+    pt_ok = os.path.exists(pt_ckpt)
     return {
         "status": "ok", "engine": "librosa",
-        "omnizart": True, "demucs": demucs_ok,
+        "omnizart": pt_ok, "demucs": demucs_ok,
         "oemer": oemer_ok, "mt3": mt3_ok,
+        # loaded=True → la transcripción responde en ~3 s; False → primera vez ~60 s
+        "mt3Loaded": _mt3_model is not None,
+        "mt3Error": _mt3_error,
     }
 
 
