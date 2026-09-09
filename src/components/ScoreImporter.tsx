@@ -75,6 +75,9 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
   const [detectedTempo, setDetectedTempo] = useState<number | null>(null);
   const [meterConf, setMeterConf] = useState<number | null>(null);
   const [musicXml, setMusicXml] = useState<string | null>(null);
+  // Cuántos segundos de audio transcribir. Es el compromiso principal: MT3
+  // cuesta ~1.7x la duración en CPU, así que la decisión es del usuario.
+  const [clipSeconds, setClipSeconds] = useState(60);
   const [allVoices, setAllVoices] = useState<ScoreVoice[] | undefined>(undefined);
   const [midiTempo, setMidiTempo] = useState<number | null>(null);
   const [dragOver, setDrag]     = useState(false);
@@ -149,11 +152,10 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
 
       } else {
         // El backend no informa de su avance, así que se estima por tiempo.
-        // Medido: la transcripción tarda ~1.3x la duración del audio, que se
-        // recorta a 60 s. Sin esto la barra se queda en 0% durante más de un
-        // minuto y parece que la aplicación se colgó.
-        const secs = Math.min(await audioDuration(file), 60);
-        const eta  = secs * 1.4 + 10;
+        // Medido en CPU con material denso: ~1.7x la duración del audio. Sin
+        // esto la barra se queda en 0% durante minutos y parece un cuelgue.
+        const secs = Math.min(await audioDuration(file), clipSeconds);
+        const eta  = secs * 1.7 + 10;
         const t0   = Date.now();
         const tick = window.setInterval(() => {
           const pct = Math.min(95, ((Date.now() - t0) / 1000 / eta) * 100);
@@ -165,7 +167,7 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
 
         let res;
         try {
-          res = await audioFileToScore(file, 120, (eng) => setEngine(eng));
+          res = await audioFileToScore(file, 120, (eng) => setEngine(eng), clipSeconds);
         } finally {
           clearInterval(tick);
           setProgressMsg('');
@@ -279,9 +281,38 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
                       ? 'PNG, JPG, WEBP — foto o escaneo de partitura impresa'
                       : mode === 'orchestra'
                         ? 'WAV, MP3 — separa voces (melodía, bajo). Requiere backend Python.'
-                        : 'MP3, WAV, M4A, OGG — máx. 30 segundos analizados'}
+                        : `MP3, WAV, M4A, OGG — se analizan los primeros ${clipSeconds} s`}
                 </p>
               </div>
+
+              {/* Cuánto audio transcribir. MT3 cuesta ~1.7x la duración en CPU,
+                  así que el compromiso lo decide quien importa, no el código. */}
+              {mode === 'audio' && (
+                <div className="w-full max-w-sm">
+                  <div className="flex items-center justify-between text-[10px] text-slate-400 mb-1.5">
+                    <span className="uppercase tracking-wide">Duración a analizar</span>
+                    <span className="font-mono text-[#C8A84B]">
+                      {clipSeconds} s · ~{Math.round(clipSeconds * 1.7 + 10)} s de espera
+                    </span>
+                  </div>
+                  <div className="flex gap-1.5">
+                    {[15, 30, 60, 120].map(s => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); setClipSeconds(s); }}
+                        className={`flex-1 py-1.5 rounded text-[11px] font-medium border transition-colors ${
+                          clipSeconds === s
+                            ? 'bg-[#C8A84B]/15 text-[#C8A84B] border-[#C8A84B]/35'
+                            : 'bg-[#1A2235] text-[#a1b0c5] border-slate-700 hover:text-white'
+                        }`}
+                      >
+                        {s < 60 ? `${s} s` : `${s / 60} min`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               {mode === 'midi' && (
                 <div className="flex items-center gap-2 text-[10px] text-[#C8A84B] bg-[#C8A84B]/10 border border-[#C8A84B]/20 rounded-lg px-3 py-2">
                   <span className="material-symbols-outlined text-[14px]">star</span>

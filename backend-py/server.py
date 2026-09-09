@@ -343,7 +343,7 @@ def _midi_to_notes_music21(midi_path: str, max_notes: int = 64) -> list:
 
 
 @app.post("/api/mt3-transcribe")
-async def mt3_transcribe(file: UploadFile = File(...)):
+async def mt3_transcribe(file: UploadFile = File(...), seconds: int = 60):
     """
     Transcripción con MR-MT3 + pipeline de notación.
 
@@ -360,9 +360,14 @@ async def mt3_transcribe(file: UploadFile = File(...)):
         with open(audio_path, "wb") as f:
             f.write(content)
 
+        # El recorte lo decide quien llama. El coste de MT3 en CPU es de ~1.7x la
+        # duración con material denso, y crece con la cantidad de notas
+        # simultáneas: es el compromiso que hay que poder ajustar.
+        secs = max(10, min(int(seconds), 300))
+
         # MT3 requiere 16 kHz
         try:
-            y, _ = librosa.load(audio_path, sr=16000, mono=True, duration=60.0)
+            y, _ = librosa.load(audio_path, sr=16000, mono=True, duration=float(secs))
         except Exception as e:
             raise HTTPException(status_code=422, detail=f"No se pudo leer el audio: {e}")
 
@@ -372,7 +377,7 @@ async def mt3_transcribe(file: UploadFile = File(...)):
         meter_conf = 0.0
         try:
             import rhythm
-            y22, sr22 = librosa.load(audio_path, sr=22050, mono=True, duration=60.0)
+            y22, sr22 = librosa.load(audio_path, sr=22050, mono=True, duration=float(secs))
             r = rhythm.analyze(y22, sr22)
             tempo_val  = r["tempo"] or 120
             time_sig   = r["timeSignature"]
@@ -415,6 +420,7 @@ async def mt3_transcribe(file: UploadFile = File(...)):
         "tempoRatio":    result["tempoRatio"],
         # Baja confianza = la cifra es dudosa y conviene que el usuario la revise
         "meterConfidence": meter_conf,
+        "secondsAnalyzed": secs,
     }
 
 

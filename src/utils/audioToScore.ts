@@ -49,14 +49,16 @@ async function backendHealth(): Promise<HealthInfo> {
   }
 }
 
-async function transcribeWithMT3(file: File): Promise<ImportedScore> {
+async function transcribeWithMT3(file: File, seconds = 60): Promise<ImportedScore> {
   const form = new FormData();
   form.append('file', file);
   const ctrl = new AbortController();
-  // El modelo se precarga al arrancar; este margen cubre audios largos
-  const t = setTimeout(() => ctrl.abort(), 300_000);
+  // Medido: MT3 cuesta ~1.7x la duración con material denso. El margen se
+  // calcula sobre eso, con holgura para audio más denso de lo previsto.
+  const budget = Math.max(120_000, seconds * 1700 * 3);
+  const t = setTimeout(() => ctrl.abort(), budget);
   try {
-    const res = await fetch(`${OMNIZART_URL}/api/mt3-transcribe`, {
+    const res = await fetch(`${OMNIZART_URL}/api/mt3-transcribe?seconds=${seconds}`, {
       method: 'POST', body: form, signal: ctrl.signal,
     });
     if (!res.ok) {
@@ -178,7 +180,8 @@ async function transcribeWithBasicPitch(
 export async function audioFileToScore(
   file: File,
   bpm = 120,
-  onProgress?: (engine: AudioEngine, pct: number) => void
+  onProgress?: (engine: AudioEngine, pct: number) => void,
+  seconds = 60,
 ): Promise<TranscribeResult> {
   const health = await backendHealth();
 
@@ -186,7 +189,7 @@ export async function audioFileToScore(
   if (health.mt3) {
     onProgress?.('omnizart', 0);
     try {
-      const score = await transcribeWithMT3(file);
+      const score = await transcribeWithMT3(file, seconds);
       onProgress?.('omnizart', 100);
       return { ...score, engine: 'omnizart' };
     } catch (e) {

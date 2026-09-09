@@ -101,12 +101,16 @@ incluir armonía sostenida o volverá a mentir.
 | `notation` | 1.0 s |
 | **Total** | **76.2 s** (1.27× la duración) |
 
-MT3 es autorregresivo: el coste escala con el **número de notas**, no solo con la
-duración. Escala medida: 5s→8.1s, 10s→13s, 20s→30s, 30s→52s.
+El coste escala con la **densidad de notas**, no solo con la duración:
 
-**Con audio real de orquesta es mucho peor.** Una grabación de la Novena de
-Beethoven pasó de 277 s sin terminar, contra los ~94 s estimados. La densidad
-polifónica real dispara el número de tokens a decodificar.
+| Material | Factor |
+|---|---|
+| Sintético poco denso, 60 s | 1.27× |
+| Sintético denso (296 notas en 12 s) | 1.67× |
+| Grabación real de orquesta | mucho peor — la Novena pasó de 277 s sin terminar |
+
+Una textura orquestal real tiene muchas más voces simultáneas que cualquier
+síntesis de prueba, y cada nota añade tokens que decodificar.
 
 ---
 
@@ -192,22 +196,44 @@ evidencia. Una métrica insensible a la densidad de rejilla es el camino.
 
 ## Lo que queda abierto
 
-### 1. Rendimiento de MT3 con audio real — el bloqueante
+### 1. Rendimiento de MT3 — sin atajo disponible
 
-El adaptador de `mt3-infer` llama a `generate()` con **`use_cache=False`**
-(`mt3_infer/adapters/mr_mt3.py`, línea 318). Eso desactiva la caché KV del
-decodificador, que entonces recalcula la atención sobre todos los tokens
-anteriores en cada paso: el coste pasa de lineal a cuadrático, y `max_length`
-son 1024.
+**Se buscaron optimizaciones de CPU y ninguna sirvió.** El coste es intrínseco
+al modelo sobre este hardware. Documentado con detalle para no repetir la
+búsqueda.
 
-Activarlo es la vía de mayor rendimiento sin tocar hardware. Pendiente de medir
-y, si confirma, aplicar como parche al cargar el modelo.
+Desglose con 12 s de audio denso (6 segmentos, 8 hilos, sin contención):
 
-Otras vías por explorar, todas en CPU:
-- **Cuantización dinámica a int8** (`torch.quantization.quantize_dynamic`), que
-  suele dar 2-4× en inferencia de transformers sobre CPU
-- Recorte del audio configurable por el usuario (hoy fijo en 60 s)
-- Procesar por tramos y entregar la partitura incrementalmente
+| Fase | Tiempo |
+|---|---|
+| `preprocess` (espectrograma) | 0.0 s |
+| **`forward` (encoder + decoder)** | **20.0 s** ← el 100% |
+| `decode` (tokens → MIDI) | 0.0 s |
+
+#### Optimizaciones probadas y descartadas
+
+| Optimización | Resultado | Por qué falla |
+|---|---|---|
+| **Caché KV** (`use_cache=True`) | 20.7 s → 19.9 s (**1.0×**) | El coste no está en el decodificado autorregresivo sino en el forward del encoder |
+| **Cuantización int8** | 21.3 s → 80.6 s (**0.26×**, 4× peor) | Además cambió la salida un 34% (296 → 397 notas) |
+| **Bajar `max_length`** | Sin efecto | La generación ya para sola en ~147 tokens; los segmentos alcanzan EOS entre 121 y 146 |
+| **Más hilos** | Ya óptimo | 1→55.8 s, 2→33.1 s, 4→24.0 s, 8→20.0 s. Los 8 son el valor por defecto |
+
+⚠️ **Cuidado al medir:** la primera medición de la caché KV dio 99.6 s contra
+91.8 s y parecía concluyente. Estaba contaminada por contención de CPU con el
+servidor de uvicorn corriendo en paralelo. Con la máquina limpia, los mismos
+12 s dieron 20.7 s. **Matar todo proceso Python antes de cronometrar.**
+
+#### Lo que sí queda
+
+El coste medido es **~1.7× la duración** con material denso, y crece con la
+cantidad de notas simultáneas. Como no hay forma de bajarlo, la decisión pasa al
+usuario: el importador ofrece 15 s / 30 s / 1 min / 2 min con la espera estimada
+al lado. El endpoint acepta `?seconds=N` (10–300).
+
+Vía sin explorar: **entregar la partitura por tramos** conforme se transcriben,
+para que las primeras notas aparezcan a los ~15 s en vez de esperar al final.
+No baja el coste total pero cambia por completo la percepción.
 
 ### 2. Nivel métrico del tempo
 
