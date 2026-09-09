@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { playNote } from '../utils/audio';
+import { playNote, playMidi } from '../utils/audio';
 
 interface NoteData {
   pitch: string;
@@ -9,6 +9,21 @@ interface NoteData {
   /** Duración exacta en negras. Puede no coincidir con `duration` cuando
    *  music21 generó una ligadura (p. ej. 1.25 se etiqueta como "quarter"). */
   quarterLength?: number;
+  measure?: number;
+  beat?: number;
+  /** Todas las notas del acorde. Sin esto la mano izquierda suena a una sola voz. */
+  midis?: number[];
+}
+
+interface VoiceData { voice: string; notes: NoteData[] }
+
+/** Un evento listo para sonar, con su posición absoluta en negras. */
+interface PlayEvent {
+  offset: number;
+  midis: number[];
+  ql: number;
+  /** Índice dentro de la voz principal, para resaltar la nota en la partitura. */
+  leadIdx: number;
 }
 
 interface PlaybackBarProps {
@@ -17,6 +32,8 @@ interface PlaybackBarProps {
   importedNotes?: NoteData[];
   onNoteChange?: (idx: number) => void;
   timeSignature?: string;
+  /** Todas las voces de la partitura. Si vienen, suenan juntas. */
+  voices?: VoiceData[];
 }
 
 // Quarter-lengths por duración
@@ -42,6 +59,7 @@ export const PlaybackBar: React.FC<PlaybackBarProps> = ({
   importedNotes,
   onNoteChange,
   timeSignature = '4/4',
+  voices,
 }) => {
   // Quarter-lengths por compás según la cifra indicadora
   const [numStr, denStr] = timeSignature.split('/');
@@ -71,41 +89,80 @@ export const PlaybackBar: React.FC<PlaybackBarProps> = ({
     onNoteChange?.(-1);
   };
 
-  const playImportedSequence = (notes: NoteData[], vol: number) => {
-    let elapsed = 0;
-    let accumQL = 0; // quarter-lengths acumulados
-    const ids: number[] = [];
-    notes.forEach((n, i) => {
-      const durSec = noteSec(n, tempo);
-      const ql     = eventQL(n);
-      const id = window.setTimeout(() => {
-        // Un silencio consume su tiempo pero no suena
-        if (!n.isRest) playNote(n.pitch, durSec * 0.92, (vol / 100) * 90);
-        noteIndexRef.current = i;
-        onNoteChange?.(i);
-        setCurrentSeconds(parseFloat(elapsed.toFixed(1)));
-        // Compás y tiempo basado en cifra indicadora real
-        const measure = Math.floor(accumQL / qlPerMeasure) + 1;
-        const beatQL  = accumQL % qlPerMeasure;
-        const beat    = Math.floor(beatQL) + 1;
-        setMeasureCounter(`${measure.toString().padStart(3,'0')}.${beat}.0`);
-        if (i === notes.length - 1) {
-          setIsPlaying(false);
-          noteIndexRef.current = 0;
-          onNoteChange?.(-1);
+  /**
+   * Convierte las voces en eventos con posición absoluta.
+   *
+   * Encadenar duraciones voz por voz no sirve cuando hay más de una: la mano
+   * izquierda quedaría desplazada respecto a la derecha en cuanto una de las dos
+   * tuviera un silencio o una ligadura. Cada evento trae su compás y su tiempo,
+   * así que la posición sale de ahí y ambas manos caen donde deben.
+   */
+  const buildEvents = (): PlayEvent[] => {
+    const lists: VoiceData[] = voices?.length
+      ? voices
+      : (importedNotes?.length ? [{ voice: 'principal', notes: importedNotes }] : []);
+    if (!lists.length) return [];
+
+    const evs: PlayEvent[] = [];
+    lists.forEach((v, vi) => {
+      let fallback = 0;   // por si al evento le faltan compás y tiempo
+      v.notes.forEach((n, i) => {
+        const ql = eventQL(n);
+        const offset = (n.measure !== undefined && n.beat !== undefined)
+          ? (n.measure - 1) * qlPerMeasure + (n.beat - 1)
+          : fallback;
+        fallback = offset + ql;
+        if (!n.isRest) {
+          const midis = n.midis?.length ? n.midis : (n.midi > 0 ? [n.midi] : []);
+          if (midis.length) {
+            evs.push({ offset, midis, ql, leadIdx: vi === 0 ? i : -1 });
+          }
         }
-      }, elapsed * 1000);
-      ids.push(id);
-      elapsed  += durSec;
-      accumQL  += ql;
+      });
     });
+    return evs.sort((a, b) => a.offset - b.offset);
+  };
+
+  const playEvents = (evs: PlayEvent[], vol: number) => {
+    const secPerQL = 60 / tempo;
+    const ids: number[] = [];
+    const last = evs[evs.length - 1];
+
+    evs.forEach((e) => {
+      const at = e.offset * secPerQL;
+      const id = window.setTimeout(() => {
+        const dur = Math.max(0.08, e.ql * secPerQL * 0.92);
+        // Un acorde suena entero; antes solo sonaba su nota más aguda
+        for (const m of e.midis) playMidi(m, dur, (vol / 100) * 88);
+
+        if (e.leadIdx >= 0) {
+          noteIndexRef.current = e.leadIdx;
+          onNoteChange?.(e.leadIdx);
+        }
+        setCurrentSeconds(parseFloat(at.toFixed(1)));
+        const measure = Math.floor(e.offset / qlPerMeasure) + 1;
+        const beat    = Math.floor(e.offset % qlPerMeasure) + 1;
+        setMeasureCounter(`${measure.toString().padStart(3, '0')}.${beat}.0`);
+      }, at * 1000);
+      ids.push(id);
+    });
+
+    // Cierre al terminar el último evento, contando su duración
+    if (last) {
+      ids.push(window.setTimeout(() => {
+        setIsPlaying(false);
+        noteIndexRef.current = 0;
+        onNoteChange?.(-1);
+      }, (last.offset + last.ql) * secPerQL * 1000 + 120));
+    }
     timeoutsRef.current = ids;
   };
 
   useEffect(() => {
     if (isPlaying) {
-      if (importedNotes?.length) {
-        playImportedSequence(importedNotes, volume);
+      const evs = buildEvents();
+      if (evs.length) {
+        playEvents(evs, volume);
       } else {
         const intervalMs = (60 / tempo) * 500;
         timerRef.current = window.setInterval(() => {
@@ -126,12 +183,31 @@ export const PlaybackBar: React.FC<PlaybackBarProps> = ({
       stopAll();
     }
     return stopAll;
-  }, [isPlaying, tempo, volume, totalSeconds, importedNotes]);
+  }, [isPlaying, tempo, volume, totalSeconds, importedNotes, voices, qlPerMeasure]);
 
   // Duración total real en segundos (calculada desde las notas importadas)
-  const actualTotal = importedNotes?.length
-    ? importedNotes.reduce((sum, n) => sum + noteSec(n, tempo), 0)
-    : totalSeconds;
+  // Duración real: hasta el final del último evento de cualquier voz, no la
+  // suma de una sola —con dos manos, la más larga manda.
+  const actualTotal = (() => {
+    const lists = voices?.length
+      ? voices
+      : (importedNotes?.length ? [{ voice: 'p', notes: importedNotes }] : []);
+    if (!lists.length) return totalSeconds;
+    const secPerQL = 60 / tempo;
+    let end = 0;
+    for (const v of lists) {
+      let acc = 0;
+      for (const n of v.notes) {
+        const ql = eventQL(n);
+        const off = (n.measure !== undefined && n.beat !== undefined)
+          ? (n.measure - 1) * qlPerMeasure + (n.beat - 1)
+          : acc;
+        acc = off + ql;
+        end = Math.max(end, acc);
+      }
+    }
+    return end * secPerQL;
+  })();
 
   const formatTime = (secs: number) => {
     const m = Math.floor(secs / 60);

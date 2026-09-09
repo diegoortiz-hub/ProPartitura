@@ -1,10 +1,14 @@
 import React, { useState, useRef } from 'react';
 import { Midi } from '@tonejs/midi';
-import { imageToScore, ImportedNote } from '../utils/imageToScore';
+import { imageToScore, ImportedNote, ScoreVoice } from '../utils/imageToScore';
 import { audioFileToScore, audioFileToScoreFull, AudioEngine, OrchestraVoice, KeySignature } from '../utils/audioToScore';
 
 interface ScoreImporterProps {
-  onImport: (notes: ImportedNote[], voice?: string, keySig?: KeySignature, timeSig?: string) => void;
+  onImport: (
+    notes: ImportedNote[], voice?: string, keySig?: KeySignature,
+    timeSig?: string, musicXml?: string | null,
+    voices?: ScoreVoice[], tempo?: number,
+  ) => void;
   onClose: () => void;
 }
 
@@ -56,6 +60,8 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
   const [timeSig, setTimeSig]   = useState('');
   const [detectedTempo, setDetectedTempo] = useState<number | null>(null);
   const [meterConf, setMeterConf] = useState<number | null>(null);
+  const [musicXml, setMusicXml] = useState<string | null>(null);
+  const [allVoices, setAllVoices] = useState<ScoreVoice[] | undefined>(undefined);
   const [midiTempo, setMidiTempo] = useState<number | null>(null);
   const [dragOver, setDrag]     = useState(false);
   const [fileName, setFile]     = useState('');
@@ -109,6 +115,8 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
         if (score.timeSignature) setTimeSig(score.timeSignature);
         if (score.tempo)         setDetectedTempo(score.tempo);
         if (score.keyLabel)      setKeyLabel(score.keyLabel);
+        setMusicXml(score.musicXml ?? null);
+        setAllVoices(score.voices);
         setProgress(100);
         setStatus('done');
 
@@ -139,6 +147,8 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
         if (res.tempo)         setDetectedTempo(res.tempo);
         if (res.keyLabel)      setKeyLabel(res.keyLabel);
         if (res.meterConfidence !== undefined) setMeterConf(res.meterConfidence);
+        setMusicXml(res.musicXml ?? null);
+        setAllVoices(res.voices);
         setProgress(100);
         setStatus('done');
       }
@@ -448,7 +458,10 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
             <button
               type="button"
               onClick={() => {
-                onImport(notes, undefined, keySig ?? undefined, timeSig || undefined);
+                onImport(
+                  notes, undefined, keySig ?? undefined, timeSig || undefined,
+                  musicXml, allVoices, detectedTempo ?? undefined,
+                );
                 onClose();
               }}
               className="px-5 py-2 rounded bg-[#C8A84B] hover:bg-[#E2C46A] text-[#0C1220] text-xs font-bold cursor-pointer transition-colors shadow-md flex items-center gap-2"

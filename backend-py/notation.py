@@ -222,7 +222,14 @@ def part_to_notes(part: stream.Part, max_notes: int = 128) -> list[dict]:
 
 
 def _event_dict(el, ql: float, measure: int, beat: float) -> dict:
-    """Serializa una nota, acorde o silencio al formato del frontend."""
+    """
+    Serializa una nota, acorde o silencio al formato del frontend.
+
+    De un acorde se destaca la nota más aguda —es la que lleva la melodía y la
+    que dibuja el pentagrama simple— pero se conservan todas en `midis`. Sin eso
+    la reproducción pierde los acordes de la mano izquierda y suena a melodía
+    suelta en vez de a la pieza.
+    """
     base = {
         "duration": ql_to_label(ql),
         "quarterLength": round(ql, 4),
@@ -230,9 +237,45 @@ def _event_dict(el, ql: float, measure: int, beat: float) -> dict:
         "beat": round(beat, 4),
     }
     if el.isRest:
-        return {**base, "pitch": "rest", "midi": -1, "isRest": True}
-    p = max(el.pitches, key=lambda x: x.midi) if el.isChord else el.pitch
-    return {**base, "pitch": p.nameWithOctave, "midi": int(p.midi), "isRest": False}
+        return {**base, "pitch": "rest", "midi": -1, "isRest": True, "midis": []}
+
+    if el.isChord:
+        pitches = sorted(el.pitches, key=lambda x: x.midi)
+        top = pitches[-1]
+        return {
+            **base,
+            "pitch": top.nameWithOctave,
+            "midi": int(top.midi),
+            "isRest": False,
+            "midis": [int(p.midi) for p in pitches],
+        }
+
+    p = el.pitch
+    return {
+        **base,
+        "pitch": p.nameWithOctave,
+        "midi": int(p.midi),
+        "isRest": False,
+        "midis": [int(p.midi)],
+    }
+
+
+def _name_part(part: stream.Part, name: str, abbrev: str) -> None:
+    """
+    Pone nombre a la parte para que el grabador escriba algo legible al margen.
+
+    Sin esto music21 emite su identificador interno —una cadena hexadecimal de
+    treinta y tantos caracteres— y OSMD la imprime tal cual junto al pentagrama.
+    """
+    part.partName = name
+    part.partAbbreviation = abbrev
+    try:
+        instr = part.getInstrument(returnDefault=True)
+        instr.partName = name
+        instr.partAbbreviation = abbrev
+        instr.instrumentName = name
+    except Exception:
+        pass
 
 
 def score_to_musicxml(score: stream.Score) -> str:
@@ -338,6 +381,7 @@ def midi_to_notated_score(
     treble_part = notate(
         build_part(treble_ev, real_bpm, ts_str, clef.TrebleClef()), key_obj
     )
+    _name_part(treble_part, "Mano derecha", "M.D.")
     score.insert(0, treble_part)
     voices_out.append({"voice": "Mano derecha", "notes": part_to_notes(treble_part)})
 
@@ -345,6 +389,7 @@ def midi_to_notated_score(
         bass_part = notate(
             build_part(bass_ev, real_bpm, ts_str, clef.BassClef()), key_obj
         )
+        _name_part(bass_part, "Mano izquierda", "M.I.")
         score.insert(0, bass_part)
         voices_out.append({"voice": "Mano izquierda", "notes": part_to_notes(bass_part)})
 

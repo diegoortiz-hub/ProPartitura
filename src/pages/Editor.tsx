@@ -5,8 +5,9 @@ import { StaffSVG, NoteData } from '../components/StaffSVG';
 import { NotePanel } from '../components/NotePanel';
 import { PlaybackBar } from '../components/PlaybackBar';
 import { ScoreImporter } from '../components/ScoreImporter';
+import { ScoreRenderer } from '../components/ScoreRenderer';
 import { playNote } from '../utils/audio';
-import type { ImportedNote } from '../utils/imageToScore';
+import type { ImportedNote, ScoreVoice } from '../utils/imageToScore';
 import type { KeySignature } from '../utils/audioToScore';
 
 export const Editor: React.FC = () => {
@@ -33,6 +34,11 @@ export const Editor: React.FC = () => {
   const [importedKeySig, setImportedKeySig]   = useState<KeySignature | undefined>(undefined);
   const [importedTimeSig, setImportedTimeSig] = useState<string | undefined>(undefined);
   const [activeNoteIdx, setActiveNoteIdx] = useState(-1);
+  const [musicXml, setMusicXml] = useState<string | undefined>(undefined);
+  const [voices, setVoices] = useState<ScoreVoice[] | undefined>(undefined);
+  const [tempo, setTempo] = useState(120);
+  // Con MusicXML se graba con OSMD; sin él queda el dibujo propio de StaffSVG
+  const [useEngraver, setUseEngraver] = useState(true);
 
   const NOTES_PER_SYSTEM = 12;
 
@@ -49,9 +55,16 @@ export const Editor: React.FC = () => {
     playNote('C4', 0.2, 70);
   };
 
-  const handleImport = (raw: ImportedNote[], _voice?: string, keySig?: KeySignature, timeSig?: string) => {
+  const handleImport = (
+    raw: ImportedNote[], _voice?: string, keySig?: KeySignature,
+    timeSig?: string, xml?: string | null,
+    allVoices?: ScoreVoice[], detectedTempo?: number,
+  ) => {
     if (keySig)  setImportedKeySig(keySig);
     if (timeSig) setImportedTimeSig(timeSig);
+    setMusicXml(xml ?? undefined);
+    setVoices(allVoices);
+    if (detectedTempo) setTempo(detectedTempo);
     const asNoteData: NoteData[] = raw.map((n, i) => ({
       id: `imported-${i}`,
       pitch: n.pitch,
@@ -252,10 +265,29 @@ export const Editor: React.FC = () => {
                   <span className="material-symbols-outlined text-[16px]">upload</span>
                   <span className="hidden sm:inline">Importar</span>
                 </button>
+                {musicXml && (
+                  <button
+                    type="button"
+                    onClick={() => setUseEngraver(v => !v)}
+                    className={`px-2 py-1 rounded text-xs border flex items-center gap-1 transition-colors ${
+                      useEngraver
+                        ? 'bg-[#C8A84B]/15 text-[#C8A84B] border-[#C8A84B]/30'
+                        : 'bg-[#1A2235] text-[#a1b0c5] border-slate-700 hover:text-white'
+                    }`}
+                    title={useEngraver
+                      ? 'Viendo el grabado profesional. Cambiar al dibujo propio.'
+                      : 'Viendo el dibujo propio. Cambiar al grabado profesional.'}
+                  >
+                    <span className="material-symbols-outlined text-[14px]">
+                      {useEngraver ? 'music_note' : 'draw'}
+                    </span>
+                    <span className="hidden sm:inline">{useEngraver ? 'Grabado' : 'Simple'}</span>
+                  </button>
+                )}
                 {importedNotes && (
                   <button
                     type="button"
-                    onClick={() => setImportedNotes(undefined)}
+                    onClick={() => { setImportedNotes(undefined); setMusicXml(undefined); }}
                     className="px-2 py-1 rounded bg-red-500/10 text-red-400 hover:bg-red-500/20 text-xs border border-red-500/20 flex items-center gap-1"
                     title="Limpiar notas importadas"
                   >
@@ -323,8 +355,21 @@ export const Editor: React.FC = () => {
                 </div>
               </div>
 
-              {/* Staff Systems — dynamic when notes imported, static (2 systems) otherwise */}
-              {importedNotes && importedNotes.length > 0 ? (
+              {/* Staff Systems — grabado con OSMD si hay MusicXML, si no el dibujo propio */}
+              {musicXml && useEngraver ? (
+                <div className="w-full mb-8">
+                  <div className="text-[11px] font-semibold text-[#C8A84B] uppercase tracking-wider flex items-center justify-between mb-3">
+                    <span>Partitura grabada</span>
+                    <span className="text-[10px] opacity-60">OpenSheetMusicDisplay</span>
+                  </div>
+                  <ScoreRenderer
+                    musicXml={musicXml}
+                    theme={scoreTheme}
+                    zoom={zoomLevel}
+                    activeNoteIdx={activeNoteIdx}
+                  />
+                </div>
+              ) : importedNotes && importedNotes.length > 0 ? (
                 Array.from({ length: Math.ceil(importedNotes.length / NOTES_PER_SYSTEM) }).map((_, sysIdx) => {
                   const offset = sysIdx * NOTES_PER_SYSTEM;
                   const slice  = importedNotes.slice(offset, offset + NOTES_PER_SYSTEM);
@@ -391,9 +436,10 @@ export const Editor: React.FC = () => {
 
         {/* Bottom Playback Bar */}
         <PlaybackBar
-          tempo={120}
+          tempo={tempo}
           totalSeconds={225}
           importedNotes={importedNotes}
+          voices={voices}
           onNoteChange={setActiveNoteIdx}
           timeSignature={importedTimeSig ?? '4/4'}
         />

@@ -10,6 +10,9 @@ export interface ImportedNote {
   measure?: number;
   beat?: number;
   quarterLength?: number;
+  /** Todas las notas del acorde. La reproducción las toca juntas; el pentagrama
+   *  simple dibuja solo `pitch`, que es la más aguda. */
+  midis?: number[];
 }
 
 export interface ScoreVoice {
@@ -40,33 +43,63 @@ export interface ImportedScore {
 const AUDIVERIS_URL = import.meta.env.VITE_OMR_URL   ?? 'http://localhost:3001';
 const OEMER_URL     = import.meta.env.VITE_OEMER_URL ?? 'http://localhost:3002';
 
-export async function imageToScore(file: File): Promise<ImportedScore> {
-  let audiverisError: string | null = null;
+// Audiveris procesa una partitura densa en 30-90 s; este techo deja margen sin
+// dejar la interfaz colgada para siempre si el proceso se atasca.
+const OMR_TIMEOUT_MS = 150_000;
 
-  // Intento 1: Audiveris (funcional)
+/** Distingue "no llegué al servidor" de "el servidor me respondió que no pudo". */
+class BackendDownError extends Error {}
+
+async function postImage(url: string, file: File, timeoutMs: number): Promise<Response> {
+  const form = new FormData();
+  form.append('file', file);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const form = new FormData();
-    form.append('file', file);
-    const res = await fetch(`${AUDIVERIS_URL}/api/omr`, { method: 'POST', body: form });
-    const json = await res.json();
+    return await fetch(url, { method: 'POST', body: form, signal: ctrl.signal });
+  } catch (e) {
+    // fetch solo lanza por fallo de red o abort; un 500 llega como respuesta
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      throw new Error(
+        `El análisis superó los ${Math.round(timeoutMs / 1000)} s. ` +
+        'Prueba con una imagen de menor resolución o con menos pentagramas.'
+      );
+    }
+    throw new BackendDownError(url);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function imageToScore(file: File): Promise<ImportedScore> {
+  // Intento 1: Audiveris
+  try {
+    const res = await postImage(`${AUDIVERIS_URL}/api/omr`, file, OMR_TIMEOUT_MS);
+    const json = await res.json().catch(() => ({}));
     if (res.ok && json.notes?.length) return json as ImportedScore;
-    audiverisError = json.error ?? `Error ${res.status} del servidor OMR`;
-  } catch {
-    audiverisError = 'El backend de Audiveris (puerto 3001) no está disponible.';
+
+    // Audiveris respondió: sabe lo que pasó y su mensaje es el más útil que hay.
+    // No se prueba Oemer aquí — está roto en este entorno y solo añadiría 25 s
+    // de espera para terminar mostrando este mismo error.
+    throw new Error(json.error ?? `El servidor OMR respondió ${res.status}.`);
+  } catch (e) {
+    if (!(e instanceof BackendDownError)) throw e;
+    // Solo si no se alcanzó Audiveris tiene sentido buscar otra vía
   }
 
-  // Intento 2: Oemer (deep learning) — normalmente falla, pero se intenta por si acaso
+  // Intento 2: Oemer, únicamente porque Audiveris no está disponible
   try {
-    const form = new FormData();
-    form.append('file', file);
-    const res = await fetch(`${OEMER_URL}/api/omr-image`, { method: 'POST', body: form });
+    const res = await postImage(`${OEMER_URL}/api/omr-image`, file, OMR_TIMEOUT_MS);
     if (res.ok) {
-      const json = await res.json();
+      const json = await res.json().catch(() => ({}));
       if (json.notes?.length) return json as ImportedScore;
     }
   } catch {
-    // Oemer no disponible — se reporta el error de Audiveris, que es más informativo
+    // También caído: se reporta abajo con instrucciones concretas
   }
 
-  throw new Error(audiverisError ?? 'No se pudo analizar la imagen.');
+  throw new Error(
+    'El servidor de reconocimiento no está disponible. ' +
+    'Arranca el backend con "node server.js" dentro de la carpeta backend.'
+  );
 }
