@@ -1,0 +1,3 @@
+# Audio generado por bench_rhythm.py — se regenera solo al correr el test
+*.wav
+__pycache__/
