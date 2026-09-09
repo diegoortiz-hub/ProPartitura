@@ -27,6 +27,10 @@ export interface ImportedScore {
   keyLabel?: string | null;
   measures?: number;
   engine?: string;
+  /** Confianza en la cifra indicadora (0..1). Por debajo de ~0.25 conviene que
+   *  el usuario la revise: el compás compuesto es difícil de distinguir del
+   *  simple solo por acentos. */
+  meterConfidence?: number;
 }
 
 // Audiveris en Node (port 3001) — Oemer en Python (port 3002) como fallback.

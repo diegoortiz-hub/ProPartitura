@@ -55,6 +55,7 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
   const [keySig, setKeySig]     = useState<KeySignature | null>(null);
   const [timeSig, setTimeSig]   = useState('');
   const [detectedTempo, setDetectedTempo] = useState<number | null>(null);
+  const [meterConf, setMeterConf] = useState<number | null>(null);
   const [midiTempo, setMidiTempo] = useState<number | null>(null);
   const [dragOver, setDrag]     = useState(false);
   const [fileName, setFile]     = useState('');
@@ -137,6 +138,7 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
         if (res.timeSignature) setTimeSig(res.timeSignature);
         if (res.tempo)         setDetectedTempo(res.tempo);
         if (res.keyLabel)      setKeyLabel(res.keyLabel);
+        if (res.meterConfidence !== undefined) setMeterConf(res.meterConfidence);
         setProgress(100);
         setStatus('done');
       }
@@ -380,6 +382,17 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
                     <div className="flex items-center gap-1.5">
                       <span className="text-[10px] text-slate-400 uppercase tracking-wide">Compás</span>
                       <span className="text-xs font-bold text-white">{timeSig}</span>
+                      {/* El compás compuesto cuesta distinguirlo del simple solo
+                          por acentos; con poca confianza se avisa en vez de
+                          presentarlo como un dato firme. */}
+                      {meterConf !== null && meterConf < 0.25 && (
+                        <span
+                          className="text-[9px] font-semibold text-amber-400 bg-amber-400/10 border border-amber-400/25 rounded px-1.5 py-px"
+                          title="La detección de compás no es concluyente. Revisa que las barras caigan donde corresponde."
+                        >
+                          revisar
+                        </span>
+                      )}
                     </div>
                   )}
                   {detectedTempo && (

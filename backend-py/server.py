@@ -123,7 +123,8 @@ def detect_key(y: np.ndarray, sr: int) -> tuple[str, str, dict]:
 
 def detect_tempo_and_beats(y: np.ndarray, sr: int) -> tuple[float, np.ndarray]:
     tempo_arr, beat_frames = librosa.beat.beat_track(y=y, sr=sr, units='frames')
-    tempo       = float(tempo_arr)
+    # librosa devuelve un array; float() sobre él lanza TypeError
+    tempo       = float(np.atleast_1d(tempo_arr)[0])
     beat_times  = librosa.frames_to_time(beat_frames, sr=sr)
     return tempo, beat_times
 
@@ -364,12 +365,15 @@ async def mt3_transcribe(file: UploadFile = File(...)):
         # Tempo, tonalidad y compás salen del audio, no del MIDI: el MIDI de MT3
         # viene en un marco de 120 BPM fijo que no corresponde a la pieza.
         tempo_val, key_name, mode, key_sig, time_sig = 120, "C", "major", {"flats": [], "sharps": []}, "4/4"
+        meter_conf = 0.0
         try:
+            import rhythm
             y22, sr22 = librosa.load(audio_path, sr=22050, mono=True, duration=60.0)
-            tempo_arr, _ = librosa.beat.beat_track(y=y22, sr=sr22)
-            tempo_val = int(float(np.atleast_1d(tempo_arr)[0])) or 120
+            r = rhythm.analyze(y22, sr22)
+            tempo_val  = r["tempo"] or 120
+            time_sig   = r["timeSignature"]
+            meter_conf = r["meterConfidence"]
             key_name, mode, key_sig = detect_key(y22, sr22)
-            time_sig = detect_meter(y22, sr22, float(tempo_val))
         except Exception:
             pass
 
@@ -405,6 +409,8 @@ async def mt3_transcribe(file: UploadFile = File(...)):
         "keySignature":  key_sig,
         "measures":      result["measures"],
         "tempoRatio":    result["tempoRatio"],
+        # Baja confianza = la cifra es dudosa y conviene que el usuario la revise
+        "meterConfidence": meter_conf,
     }
 
 
@@ -531,9 +537,16 @@ async def audio_omr_full(file: UploadFile = File(...), bpm: int = 120):
 
         # ── Capa 2: Tonalidad, tempo y compás ────────────────────────────
         key_name, mode, key_sig = detect_key(y_mono, sr)
-        tempo, beat_times       = detect_tempo_and_beats(y_mono, sr)
-        time_sig                = detect_meter(y_mono, sr, tempo)
-        beat_dur                = 60.0 / max(tempo, 40.0)
+        try:
+            import rhythm
+            r          = rhythm.analyze(y_mono, sr)
+            tempo      = float(r["tempoExact"])
+            time_sig   = r["timeSignature"]
+            beat_times = r["beats"]
+        except Exception:
+            tempo, beat_times = detect_tempo_and_beats(y_mono, sr)
+            time_sig          = detect_meter(y_mono, sr, tempo)
+        beat_dur = 60.0 / max(tempo, 40.0)
 
         # ── Capa 1b: HPSS — separación armónica / percusiva ──────────────
         # Rápido (~1 s); sustituye Demucs para evitar timeouts en CPU

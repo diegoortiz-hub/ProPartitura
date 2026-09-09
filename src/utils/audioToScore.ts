@@ -11,6 +11,7 @@ export type AudioEngine = 'omnizart' | 'basic-pitch' | 'demucs';
 export interface TranscribeResult extends Partial<ImportedScore> {
   notes: ImportedNote[];
   engine: AudioEngine;
+  keyLabel?: string | null;
 }
 export interface OrchestraVoice    { voice: string; notes: ImportedNote[] }
 export interface KeySignature      { flats: string[]; sharps: string[] }
