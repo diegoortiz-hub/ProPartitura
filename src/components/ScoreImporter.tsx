@@ -100,9 +100,14 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
         setStatus('done');
 
       } else if (mode === 'image') {
-        const result = await imageToScore(file);
-        if (!result.length) throw new Error('No se detectaron notas. Prueba con una imagen más nítida.');
-        setNotes(result);
+        const score = await imageToScore(file);
+        if (!score.notes.length) throw new Error('No se detectaron notas. Prueba con una imagen más nítida.');
+        setNotes(score.notes);
+        // La cifra indicadora viene del grabado original: es la que hace
+        // cuadrar los tiempos por compás en el editor.
+        if (score.timeSignature) setTimeSig(score.timeSignature);
+        if (score.tempo)         setDetectedTempo(score.tempo);
+        if (score.keyLabel)      setKeyLabel(score.keyLabel);
         setProgress(100);
         setStatus('done');
 
@@ -127,6 +132,11 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
         if (!res.notes.length) throw new Error('No se detectaron notas. Prueba con un audio más limpio.');
         setNotes(res.notes);
         setEngine(res.engine);
+        // Metadatos detectados del audio: sin la cifra indicadora el editor
+        // no puede agrupar las figuras en compases correctos.
+        if (res.timeSignature) setTimeSig(res.timeSignature);
+        if (res.tempo)         setDetectedTempo(res.tempo);
+        if (res.keyLabel)      setKeyLabel(res.keyLabel);
         setProgress(100);
         setStatus('done');
       }
@@ -424,7 +434,10 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
           {status === 'done' && notes.length > 0 && (
             <button
               type="button"
-              onClick={() => { onImport(notes); onClose(); }}
+              onClick={() => {
+                onImport(notes, undefined, keySig ?? undefined, timeSig || undefined);
+                onClose();
+              }}
               className="px-5 py-2 rounded bg-[#C8A84B] hover:bg-[#E2C46A] text-[#0C1220] text-xs font-bold cursor-pointer transition-colors shadow-md flex items-center gap-2"
             >
               <span className="material-symbols-outlined text-[18px]">edit_note</span>

@@ -55,16 +55,22 @@ export const Editor: React.FC = () => {
     const asNoteData: NoteData[] = raw.map((n, i) => ({
       id: `imported-${i}`,
       pitch: n.pitch,
-      name: `${n.pitch}`,
+      name: n.isRest ? 'Silencio' : `${n.pitch}`,
       duration: n.duration,
       durationLabel: n.duration,
       midi: n.midi,
       system: 'treble' as const,
-      measure: Math.floor(i / 4) + 1,
-      beat: (i % 4) + 1,
+      // El backend manda el compás real calculado por music21; solo se estima
+      // aquí cuando falta (p. ej. un MIDI importado sin pasar por notación).
+      measure: n.measure ?? Math.floor(i / 4) + 1,
+      beat: n.beat ?? (i % 4) + 1,
+      isRest: n.isRest,
+      quarterLength: n.quarterLength,
     }));
     setImportedNotes(asNoteData);
-    if (asNoteData[0]) setSelectedNote(asNoteData[0]);
+    // Seleccionar la primera nota real; un silencio no tiene nada que editar
+    const firstPitched = asNoteData.find(n => !n.isRest);
+    if (firstPitched) setSelectedNote(firstPitched);
   };
 
   return (

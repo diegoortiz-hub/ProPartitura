@@ -12,6 +12,10 @@ export interface NoteData {
   measure: number;
   beat: number;
   articulation?: 'staccato' | 'tenuto' | 'accent' | 'fermata';
+  /** Silencio: ocupa tiempo en el compás pero no se toca ni se dibuja como nota. */
+  isRest?: boolean;
+  /** Duración exacta en negras según music21 (puede incluir ligaduras). */
+  quarterLength?: number;
 }
 
 interface KeySignature { flats: string[]; sharps: string[] }
@@ -42,9 +46,11 @@ function pitchToY(pitch: string, octaveShift = 0): number {
 }
 
 // Auto-shift imported notes by octave so median MIDI lands inside C3–C6 (MIDI 48–84)
-function autoOctaveShift(notes: { midi: number }[]): number {
-  if (!notes.length) return 0;
-  const sorted = [...notes].map(n => n.midi).sort((a, b) => a - b);
+// Los silencios (midi -1) se excluyen: incluirlos hundiría la mediana.
+function autoOctaveShift(notes: { midi: number; isRest?: boolean }[]): number {
+  const pitched = notes.filter(n => !n.isRest && n.midi > 0);
+  if (!pitched.length) return 0;
+  const sorted = pitched.map(n => n.midi).sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)];
   if (median < 48) return Math.ceil((48 - median) / 12);
   if (median > 84) return -Math.ceil((median - 84) / 12);
@@ -54,6 +60,11 @@ function autoOctaveShift(notes: { midi: number }[]): number {
 // Key signature accidental positions in treble clef (y in viewBox coords)
 const FLAT_Y  = [60, 42, 66, 48, 72, 54, 78]; // Bb Eb Ab Db Gb Cb Fb
 const SHARP_Y = [36, 54, 24, 48, 66, 42, 60]; // F# C# G# D# A# E# B#
+
+// Glifos de silencio por figura
+const REST_GLYPH: Record<string, string> = {
+  whole: '𝄻', half: '𝄼', quarter: '𝄽', eighth: '𝄾', sixteenth: '𝄿',
+};
 
 export const StaffSVG: React.FC<StaffSVGProps> = ({
   selectedNoteId = 'note-treble-2',
@@ -404,30 +415,49 @@ export const StaffSVG: React.FC<StaffSVGProps> = ({
           // 4/4 → 4*(4/4)=4  |  3/4 → 3  |  6/8 → 6*(4/8)=3  |  2/4 → 2
           const qlPerMeasure = tsNum * (4 / tsDen);
 
-          // Agrupar notas en compases (llenando hasta qlPerMeasure)
+          // Agrupar en compases. Si el backend ya mandó el número de compás
+          // (viene de music21, que conoce ligaduras y silencios de relleno) se
+          // respeta tal cual; recalcularlo aquí haría que las barras de compás
+          // discrepen del reparto real de la partitura.
           interface MGroup { notes: typeof visibleNotes; offsets: number[] }
           const measures: MGroup[] = [];
-          let curM: MGroup = { notes: [], offsets: [] };
-          let curQL = 0;
-          for (const note of visibleNotes) {
-            const ql = DUR_QL[note.duration] ?? 1;
-            // Iniciar nuevo compás si el actual se llenoría y ya tiene notas
-            if (curQL + ql > qlPerMeasure + 0.001 && curM.notes.length > 0) {
-              measures.push(curM);
-              curM = { notes: [], offsets: [] };
-              curQL = 0;
+          const hasBackendMeasures = visibleNotes.some(n => typeof n.measure === 'number' && n.measure > 0);
+
+          if (hasBackendMeasures) {
+            const byMeasure = new Map<number, MGroup>();
+            for (const note of visibleNotes) {
+              const mNum = note.measure ?? 1;
+              let g = byMeasure.get(mNum);
+              if (!g) { g = { notes: [], offsets: [] }; byMeasure.set(mNum, g); }
+              // beat viene 1-indexado desde el backend
+              g.offsets.push(Math.max(0, (note.beat ?? 1) - 1));
+              g.notes.push(note);
             }
-            curM.offsets.push(curQL);
-            curM.notes.push(note);
-            curQL += ql;
-            // Compás exactamente lleno → siguiente compás
-            if (Math.abs(curQL - qlPerMeasure) < 0.001) {
-              measures.push(curM);
-              curM = { notes: [], offsets: [] };
-              curQL = 0;
+            for (const k of [...byMeasure.keys()].sort((a, b) => a - b)) {
+              measures.push(byMeasure.get(k)!);
             }
+          } else {
+            // Sin metadatos (MIDI importado a mano): se acumulan las figuras
+            let curM: MGroup = { notes: [], offsets: [] };
+            let curQL = 0;
+            for (const note of visibleNotes) {
+              const ql = DUR_QL[note.duration] ?? 1;
+              if (curQL + ql > qlPerMeasure + 0.001 && curM.notes.length > 0) {
+                measures.push(curM);
+                curM = { notes: [], offsets: [] };
+                curQL = 0;
+              }
+              curM.offsets.push(curQL);
+              curM.notes.push(note);
+              curQL += ql;
+              if (Math.abs(curQL - qlPerMeasure) < 0.001) {
+                measures.push(curM);
+                curM = { notes: [], offsets: [] };
+                curQL = 0;
+              }
+            }
+            if (curM.notes.length > 0) measures.push(curM);
           }
-          if (curM.notes.length > 0) measures.push(curM);
 
           const numM = Math.max(measures.length, 1);
           const mw   = (END_X - START_X) / numM; // ancho de cada compás en SVG
@@ -456,8 +486,19 @@ export const StaffSVG: React.FC<StaffSVGProps> = ({
                   stroke={barLineColor} strokeWidth="1" />
               ))}
 
-              {/* Notas posicionadas dentro de su compás */}
+              {/* Notas y silencios posicionados dentro de su compás */}
               {flatNotes.map(({ note, cx, globalIdx }) => {
+                // Los silencios ocupan su tiempo pero se dibujan con su propio glifo
+                if (note.isRest) {
+                  return (
+                    <g key={`rest-${globalIdx}`}>
+                      <text x={cx - 5} y={64} fontSize="20" fill={defaultNoteColor}
+                        fontFamily="serif" opacity="0.75">
+                        {REST_GLYPH[note.duration] ?? '𝄽'}
+                      </text>
+                    </g>
+                  );
+                }
                 const cy = pitchToY(note.pitch, shift);
                 const isSelected = note.id === selectedNoteId;
                 const isActive   = activeNoteIdx >= 0 && (noteOffset + globalIdx) === activeNoteIdx;

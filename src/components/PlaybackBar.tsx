@@ -5,6 +5,10 @@ interface NoteData {
   pitch: string;
   duration: 'whole' | 'half' | 'quarter' | 'eighth' | 'sixteenth';
   midi: number;
+  isRest?: boolean;
+  /** Duración exacta en negras. Puede no coincidir con `duration` cuando
+   *  music21 generó una ligadura (p. ej. 1.25 se etiqueta como "quarter"). */
+  quarterLength?: number;
 }
 
 interface PlaybackBarProps {
@@ -20,10 +24,14 @@ const DUR_QL: Record<string, number> = {
   whole: 4, half: 2, quarter: 1, eighth: 0.5, sixteenth: 0.25,
 };
 
+// Quarter-lengths de un evento: se prefiere el valor exacto del backend
+function eventQL(n: { duration: string; quarterLength?: number }): number {
+  return n.quarterLength ?? DUR_QL[n.duration] ?? 1;
+}
+
 // Duración en segundos a un tempo dado
-function noteSec(duration: string, tempo: number): number {
-  const ql = DUR_QL[duration] ?? 1;
-  return (ql * 60) / tempo;
+function noteSec(n: { duration: string; quarterLength?: number }, tempo: number): number {
+  return (eventQL(n) * 60) / tempo;
 }
 
 const DEFAULT_MOTIF = ['C4','E4','G4','C5','E5','D5','C5','B4','A4','G4'];
@@ -68,10 +76,11 @@ export const PlaybackBar: React.FC<PlaybackBarProps> = ({
     let accumQL = 0; // quarter-lengths acumulados
     const ids: number[] = [];
     notes.forEach((n, i) => {
-      const durSec = noteSec(n.duration, tempo);
-      const ql     = DUR_QL[n.duration] ?? 1;
+      const durSec = noteSec(n, tempo);
+      const ql     = eventQL(n);
       const id = window.setTimeout(() => {
-        playNote(n.pitch, durSec * 0.92, (vol / 100) * 90);
+        // Un silencio consume su tiempo pero no suena
+        if (!n.isRest) playNote(n.pitch, durSec * 0.92, (vol / 100) * 90);
         noteIndexRef.current = i;
         onNoteChange?.(i);
         setCurrentSeconds(parseFloat(elapsed.toFixed(1)));
@@ -121,7 +130,7 @@ export const PlaybackBar: React.FC<PlaybackBarProps> = ({
 
   // Duración total real en segundos (calculada desde las notas importadas)
   const actualTotal = importedNotes?.length
-    ? importedNotes.reduce((sum, n) => sum + noteSec(n.duration, tempo), 0)
+    ? importedNotes.reduce((sum, n) => sum + noteSec(n, tempo), 0)
     : totalSeconds;
 
   const formatTime = (secs: number) => {

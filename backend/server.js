@@ -59,19 +59,31 @@ function getAudiverisCmd(tmpDir, imgPath) {
 const PYTHON_EXE  = path.join(__dirname, '..', 'backend-py', '.venv', 'Scripts', 'python.exe');
 const PARSE_SCRIPT = path.join(__dirname, 'parse_mxl.py');
 
+// Devuelve la partitura completa: notas, voces, MusicXML y metadatos.
+// El MusicXML se conserva para poder renderizarlo con un motor de grabado real.
 function parseMxlWithMusic21(mxlPath) {
   const proc = spawnSync(PYTHON_EXE, [PARSE_SCRIPT, mxlPath], {
-    timeout: 30_000,
+    timeout: 60_000,
     encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,   // el MusicXML puede pesar varios MB
   });
-  if (proc.status !== 0) {
-    const err = (proc.stderr || proc.stdout || '').slice(-500);
-    throw new Error('music21 parse error: ' + err);
-  }
   const out = (proc.stdout || '').trim();
+  if (proc.status !== 0) {
+    // El script reporta errores como JSON; si lo logró, se usa ese mensaje
+    try {
+      const parsed = JSON.parse(out);
+      if (parsed.error) throw new Error(parsed.error);
+    } catch (e) {
+      if (e instanceof SyntaxError) {
+        throw new Error('music21 parse error: ' + (proc.stderr || out).slice(-500));
+      }
+      throw e;
+    }
+    throw new Error('music21 parse error: ' + (proc.stderr || out).slice(-500));
+  }
   const result = JSON.parse(out);
   if (result.error) throw new Error(result.error);
-  return result.notes;
+  return result;
 }
 
 // step name → semitone offset within octave
@@ -199,11 +211,20 @@ app.post('/api/omr', upload.single('file'), async (req, res) => {
     if (!mxlFiles.length) throw new Error('Audiveris procesó la imagen pero no detectó pentagramas. Usa una imagen de partitura clara (PNG/JPG, >300 dpi).');
 
     const mxlPath = path.join(tmpDir, mxlFiles[0]);
-    const notes = parseMxlWithMusic21(mxlPath);
+    const score = parseMxlWithMusic21(mxlPath);
 
-    if (!notes.length) throw new Error('No se detectaron notas en la imagen. Prueba con una imagen más nítida.');
+    if (!score.notes?.length) throw new Error('No se detectaron notas en la imagen. Prueba con una imagen más nítida.');
 
-    res.json({ notes });
+    res.json({
+      notes:         score.notes,
+      voices:        score.voices,
+      musicXml:      score.musicXml,
+      timeSignature: score.timeSignature,
+      tempo:         score.tempo,
+      keyLabel:      score.keyLabel,
+      measures:      score.measures,
+      engine:        'audiveris+notation',
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   } finally {

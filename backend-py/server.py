@@ -340,8 +340,11 @@ def _midi_to_notes_music21(midi_path: str, max_notes: int = 64) -> list:
 @app.post("/api/mt3-transcribe")
 async def mt3_transcribe(file: UploadFile = File(...)):
     """
-    Transcripción con MR-MT3 (176 MB, Multi-instrument).
-    El modelo se precarga al arrancar; la inferencia tarda ~1 s por 4 s de audio.
+    Transcripción con MR-MT3 + pipeline de notación.
+
+    MT3 resuelve la parte física (qué suena y cuándo); notation.py resuelve la
+    parte musical (qué figura se escribe). Sin ese segundo paso las duraciones
+    salen del release acústico y los compases no cuadran con la cifra indicadora.
     """
     suffix  = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
     content = await file.read()
@@ -358,13 +361,17 @@ async def mt3_transcribe(file: UploadFile = File(...)):
         except Exception as e:
             raise HTTPException(status_code=422, detail=f"No se pudo leer el audio: {e}")
 
-        # Detectar tempo (22 kHz para librosa beat tracker)
+        # Tempo, tonalidad y compás salen del audio, no del MIDI: el MIDI de MT3
+        # viene en un marco de 120 BPM fijo que no corresponde a la pieza.
+        tempo_val, key_name, mode, key_sig, time_sig = 120, "C", "major", {"flats": [], "sharps": []}, "4/4"
         try:
-            y22, _ = librosa.load(audio_path, sr=22050, mono=True, duration=30.0)
-            tempo_arr, _ = librosa.beat.beat_track(y=y22, sr=22050)
-            tempo = int(float(tempo_arr))
+            y22, sr22 = librosa.load(audio_path, sr=22050, mono=True, duration=60.0)
+            tempo_arr, _ = librosa.beat.beat_track(y=y22, sr=sr22)
+            tempo_val = int(float(np.atleast_1d(tempo_arr)[0])) or 120
+            key_name, mode, key_sig = detect_key(y22, sr22)
+            time_sig = detect_meter(y22, sr22, float(tempo_val))
         except Exception:
-            tempo = 120
+            pass
 
         try:
             model = get_mt3_model()          # cacheado en memoria
@@ -373,12 +380,32 @@ async def mt3_transcribe(file: UploadFile = File(...)):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error MT3: {e}")
 
-        notes = _midi_to_notes_music21(midi_path)
+        try:
+            import notation
+            result = notation.midi_to_notated_score(
+                midi_path, real_bpm=float(tempo_val),
+                ts_str=time_sig, detected_key=key_name,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error de notación: {e}")
 
-    if not notes:
+    if not result["notes"]:
         raise HTTPException(status_code=422, detail="MT3 no detectó notas en el audio.")
 
-    return {"notes": notes, "engine": "mr_mt3+music21", "tempo": tempo}
+    return {
+        "notes":         result["notes"],
+        "voices":        result["voices"],
+        "musicXml":      result["musicXml"],
+        "engine":        "mr_mt3+notation",
+        "tempo":         tempo_val,
+        "timeSignature": time_sig,
+        "key":           key_name,
+        "mode":          mode,
+        "keyLabel":      f"{key_name} {mode}",
+        "keySignature":  key_sig,
+        "measures":      result["measures"],
+        "tempoRatio":    result["tempoRatio"],
+    }
 
 
 @app.post("/api/audio-transcribe")

@@ -4,11 +4,14 @@ import {
   addPitchBendsToNoteEvents,
   outputToNotesPoly,
 } from '@spotify/basic-pitch';
-import type { ImportedNote } from './imageToScore';
+import type { ImportedNote, ImportedScore } from './imageToScore';
 
-export type { ImportedNote };
+export type { ImportedNote, ImportedScore };
 export type AudioEngine = 'omnizart' | 'basic-pitch' | 'demucs';
-export interface TranscribeResult  { notes: ImportedNote[]; engine: AudioEngine }
+export interface TranscribeResult extends Partial<ImportedScore> {
+  notes: ImportedNote[];
+  engine: AudioEngine;
+}
 export interface OrchestraVoice    { voice: string; notes: ImportedNote[] }
 export interface KeySignature      { flats: string[]; sharps: string[] }
 export interface OrchestraResult   {
@@ -45,11 +48,11 @@ async function backendHealth(): Promise<HealthInfo> {
   }
 }
 
-async function transcribeWithMT3(file: File): Promise<ImportedNote[]> {
+async function transcribeWithMT3(file: File): Promise<ImportedScore> {
   const form = new FormData();
   form.append('file', file);
   const ctrl = new AbortController();
-  // Primera vez descarga 176 MB desde HuggingFace
+  // El modelo se precarga al arrancar; este margen cubre audios largos
   const t = setTimeout(() => ctrl.abort(), 300_000);
   try {
     const res = await fetch(`${OMNIZART_URL}/api/mt3-transcribe`, {
@@ -59,8 +62,7 @@ async function transcribeWithMT3(file: File): Promise<ImportedNote[]> {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail ?? `HTTP ${res.status}`);
     }
-    const { notes } = await res.json();
-    return notes as ImportedNote[];
+    return (await res.json()) as ImportedScore;
   } finally {
     clearTimeout(t);
   }
@@ -179,13 +181,13 @@ export async function audioFileToScore(
 ): Promise<TranscribeResult> {
   const health = await backendHealth();
 
-  // Motor 1: MR-MT3 (multi-instrumento, mejor calidad)
+  // Motor 1: MR-MT3 + pipeline de notación (mejor calidad)
   if (health.mt3) {
     onProgress?.('omnizart', 0);
     try {
-      const notes = await transcribeWithMT3(file);
+      const score = await transcribeWithMT3(file);
       onProgress?.('omnizart', 100);
-      return { notes, engine: 'omnizart' };
+      return { ...score, engine: 'omnizart' };
     } catch (e) {
       console.warn('[OMR] MT3 falló, probando piano_transcription:', e);
     }

@@ -1,53 +1,28 @@
 """
-parse_mxl.py — Parsea un archivo MXL/XML con music21.
-Extrae solo el pentagrama de clave de sol (treble, parte 0).
-Toma la nota más alta de cada acorde (melodía).
-Filtra el rango de melodía: C3–C7 (midi 48–96).
-Salida: JSON por stdout  {"notes": [...]} o {"error": "..."}
+parse_mxl.py — Convierte la salida de Audiveris (MXL/XML) en partitura notada.
+
+Llamado desde backend/server.js vía spawnSync. Delega en backend-py/notation.py
+para no duplicar la lógica de notación entre la ruta de imagen y la de audio.
+
+A diferencia del audio, el MusicXML de Audiveris ya trae compases y figuras del
+grabador original. Lo que faltaba antes era conservar los silencios: sin ellos la
+suma de tiempos de cada compás nunca cuadra con la cifra indicadora.
+
+Salida: JSON por stdout — {"notes", "voices", "musicXml", "timeSignature", ...}
+        o {"error": "..."}
 """
 import sys
 import json
+import os
 
-def ql_to_duration(ql: float) -> str:
-    if ql >= 3.5:   return "whole"
-    if ql >= 1.75:  return "half"
-    if ql >= 0.875: return "quarter"
-    if ql >= 0.4:   return "eighth"
-    return "sixteenth"
+# notation.py vive en el backend de Python; se comparte entre ambas rutas
+_NOTATION_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend-py")
+sys.path.insert(0, os.path.abspath(_NOTATION_DIR))
 
-def parse(path: str) -> list:
-    import music21
 
-    score = music21.converter.parse(path)
-    parts = score.parts
-    if not parts:
-        return []
-
-    # Usar la primera parte (clave de sol / mano derecha en partitura de piano)
-    treble = parts[0]
-    notes_out = []
-
-    for el in treble.flatten().notesAndRests:
-        if el.isRest:
-            continue
-
-        # Acorde → nota más alta (melodía)
-        if el.isChord:
-            highest = max(el.pitches, key=lambda p: p.midi)
-            pitch_str = highest.nameWithOctave   # "C4", "F#5" …
-            midi = highest.midi
-        else:
-            pitch_str = el.pitch.nameWithOctave
-            midi = el.pitch.midi
-
-        # Filtrar solo rango de melodía (C3–C7)
-        if not (48 <= midi <= 96):
-            continue
-
-        duration = ql_to_duration(float(el.duration.quarterLength))
-        notes_out.append({"pitch": pitch_str, "duration": duration, "midi": midi})
-
-    return notes_out[:64]
+def parse(path: str) -> dict:
+    import notation
+    return notation.notated_xml_to_output(path, max_notes=128)
 
 
 if __name__ == "__main__":
@@ -55,8 +30,11 @@ if __name__ == "__main__":
         print(json.dumps({"error": "Uso: parse_mxl.py <ruta_archivo.mxl>"}))
         sys.exit(1)
     try:
-        notes = parse(sys.argv[1])
-        print(json.dumps({"notes": notes}))
+        result = parse(sys.argv[1])
+        if not result.get("notes"):
+            print(json.dumps({"error": "No se detectaron notas en la partitura."}))
+            sys.exit(1)
+        print(json.dumps(result))
     except Exception as exc:
-        print(json.dumps({"error": str(exc)}))
+        print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
         sys.exit(1)
