@@ -257,16 +257,17 @@ def _parse_mxl_music21(xml_path: str) -> list:
     parts = score.parts
     if not parts:
         return []
+    from notation import element_pitches
     treble = parts[0]
     notes_out = []
     for el in treble.flatten().notesAndRests:
         if el.isRest:
             continue
-        if el.isChord:
-            highest = max(el.pitches, key=lambda p: p.midi)
-            pitch_str, midi = highest.nameWithOctave, highest.midi
-        else:
-            pitch_str, midi = el.pitch.nameWithOctave, el.pitch.midi
+        pitches = element_pitches(el)
+        if not pitches:
+            continue
+        highest = max(pitches, key=lambda p: p.midi)
+        pitch_str, midi = highest.nameWithOctave, highest.midi
         if not (48 <= midi <= 96):
             continue
         duration = _ql_to_duration(float(el.duration.quarterLength))
@@ -322,15 +323,18 @@ def _midi_to_notes_music21(midi_path: str, max_notes: int = 64) -> list:
     best_part = max(score.parts, key=lambda p: len(p.flatten().notes), default=None)
     if best_part is None:
         return []
+    from notation import element_pitches
     notes_out = []
     for el in best_part.flatten().notesAndRests:
         if el.isRest:
             continue
-        if el.isChord:
-            highest = max(el.pitches, key=lambda p: p.midi)
-            pitch_str, midi = highest.nameWithOctave, highest.midi
-        else:
-            pitch_str, midi = el.pitch.nameWithOctave, el.pitch.midi
+        # element_pitches evita el AttributeError con la percusión que
+        # transcribe MT3 y que music21 devuelve como PercussionChord
+        pitches = element_pitches(el)
+        if not pitches:
+            continue
+        highest = max(pitches, key=lambda p: p.midi)
+        pitch_str, midi = highest.nameWithOctave, highest.midi
         if not (36 <= midi <= 96):
             continue
         duration = _ql_to_duration(float(el.duration.quarterLength))

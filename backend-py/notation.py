@@ -42,6 +42,24 @@ def _snap(x: float, grid: float = GRID) -> float:
     return round(x / grid) * grid
 
 
+def element_pitches(el) -> list:
+    """
+    Alturas de un elemento, sea nota o acorde, o lista vacía si no tiene.
+
+    Acceder a `el.pitch` directamente rompe con la percusión: MT3 transcribe
+    batería y music21 la entrega como `PercussionChord`, que expone `pitches`
+    pero no `pitch`. Y aunque no reventara, un golpe de caja no tiene altura que
+    llevar al pentagrama —sus "notas" son códigos de instrumento— así que se
+    descarta en vez de dibujarse como si fuera melodía.
+    """
+    if "Percussion" in type(el).__name__:
+        return []
+    if getattr(el, "isRest", False):
+        return []
+    ps = getattr(el, "pitches", None)
+    return list(ps) if ps else []
+
+
 def _fit_notatable(ql: float) -> float:
     """
     Mayor figura que cabe en `ql` sin pasarse.
@@ -80,11 +98,13 @@ def extract_events(midi_path: str, real_bpm: float) -> tuple[list[dict], float]:
 
     events: list[dict] = []
     for el in sc.flatten().notes:
+        pitches = element_pitches(el)
+        if not pitches:
+            continue                       # percusión u otro evento sin altura
         onset = float(el.offset) * ratio
         sound = float(el.duration.quarterLength) * ratio
-        midis = [p.midi for p in el.pitches] if el.isChord else [el.pitch.midi]
-        for m in midis:
-            events.append({"onset": onset, "sound": sound, "midi": int(m)})
+        for p in pitches:
+            events.append({"onset": onset, "sound": sound, "midi": int(p.midi)})
 
     events.sort(key=lambda e: (e["onset"], e["midi"]))
     return events, ratio
@@ -239,24 +259,18 @@ def _event_dict(el, ql: float, measure: int, beat: float) -> dict:
     if el.isRest:
         return {**base, "pitch": "rest", "midi": -1, "isRest": True, "midis": []}
 
-    if el.isChord:
-        pitches = sorted(el.pitches, key=lambda x: x.midi)
-        top = pitches[-1]
-        return {
-            **base,
-            "pitch": top.nameWithOctave,
-            "midi": int(top.midi),
-            "isRest": False,
-            "midis": [int(p.midi) for p in pitches],
-        }
+    pitches = sorted(element_pitches(el), key=lambda x: x.midi)
+    if not pitches:
+        # Percusión: ocupa su tiempo en el compás pero no lleva altura
+        return {**base, "pitch": "rest", "midi": -1, "isRest": True, "midis": []}
 
-    p = el.pitch
+    top = pitches[-1]
     return {
         **base,
-        "pitch": p.nameWithOctave,
-        "midi": int(p.midi),
+        "pitch": top.nameWithOctave,
+        "midi": int(top.midi),
         "isRest": False,
-        "midis": [int(p.midi)],
+        "midis": [int(p.midi) for p in pitches],
     }
 
 

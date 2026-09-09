@@ -15,6 +15,20 @@ interface ScoreImporterProps {
 type Mode = 'image' | 'audio' | 'orchestra' | 'midi';
 type Status = 'idle' | 'analyzing' | 'done' | 'error';
 
+/** Duración del audio en segundos, leída de los metadatos sin decodificarlo. */
+function audioDuration(file: File): Promise<number> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const el = new Audio();
+    const done = (secs: number) => { URL.revokeObjectURL(url); resolve(secs); };
+    el.preload = 'metadata';
+    el.onloadedmetadata = () => done(Number.isFinite(el.duration) ? el.duration : 60);
+    el.onerror = () => done(60);      // formato que el navegador no lee: se asume el tope
+    setTimeout(() => done(60), 3000); // metadatos que no llegan
+    el.src = url;
+  });
+}
+
 // ── MIDI parser ───────────────────────────────────────────────────────────────
 function parseMidiFile(midi: Midi): { notes: ImportedNote[]; tempo: number; timeSig: string } {
   const tempo = Math.round(midi.header.tempos[0]?.bpm ?? 120);
@@ -134,10 +148,28 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
         setStatus('done');
 
       } else {
-        const res = await audioFileToScore(file, 120, (eng, pct) => {
-          setEngine(eng);
-          setProgress(pct);
-        });
+        // El backend no informa de su avance, así que se estima por tiempo.
+        // Medido: la transcripción tarda ~1.3x la duración del audio, que se
+        // recorta a 60 s. Sin esto la barra se queda en 0% durante más de un
+        // minuto y parece que la aplicación se colgó.
+        const secs = Math.min(await audioDuration(file), 60);
+        const eta  = secs * 1.4 + 10;
+        const t0   = Date.now();
+        const tick = window.setInterval(() => {
+          const pct = Math.min(95, ((Date.now() - t0) / 1000 / eta) * 100);
+          setProgress(Math.round(pct));
+          setProgressMsg(
+            `Transcribiendo... ${Math.round((Date.now() - t0) / 1000)} s de ~${Math.round(eta)} s`
+          );
+        }, 500);
+
+        let res;
+        try {
+          res = await audioFileToScore(file, 120, (eng) => setEngine(eng));
+        } finally {
+          clearInterval(tick);
+          setProgressMsg('');
+        }
         if (!res.notes.length) throw new Error('No se detectaron notas. Prueba con un audio más limpio.');
         setNotes(res.notes);
         setEngine(res.engine);
@@ -280,9 +312,11 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
                     ? 'Audiveris está reconociendo la partitura...'
                     : mode === 'orchestra'
                       ? (progressMsg || 'Iniciando Demucs...')
-                      : engine
-                        ? `${engineLabel[engine]} transcribiendo...`
-                        : 'Detectando motor disponible...'}
+                      : progressMsg
+                        ? progressMsg
+                        : engine
+                          ? `${engineLabel[engine]} transcribiendo...`
+                          : 'Detectando motor disponible...'}
                 </p>
                 <p className="text-xs text-slate-400 mt-1 font-mono">{fileName}</p>
 
