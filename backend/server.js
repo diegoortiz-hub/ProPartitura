@@ -129,6 +129,33 @@ async function medirInterlinea(imgPath) {
 
 // Python venv + script para parsear MXL con music21
 const PYTHON_EXE  = path.join(__dirname, '..', 'backend-py', '.venv', 'Scripts', 'python.exe');
+const PHOTO_SCRIPT = path.join(__dirname, '..', 'backend-py', 'photo.py');
+
+/**
+ * Corrige una foto de partitura antes de pasarla al motor de OMR.
+ *
+ * Solo actúa si la imagen parece hecha con cámara: hay inclinación, sombras o
+ * perspectiva. Sobre un escaneo o una captura limpia no aporta y puede
+ * empeorar el resultado, así que en ese caso devuelve `aplicado: false` y el
+ * flujo sigue con el preprocesado de siempre.
+ *
+ * Medido con una foto simulada (perspectiva, 1.8° de giro y sombra diagonal):
+ * sin este paso Audiveris no reconocía ni una nota; con él recupera compases
+ * y duraciones.
+ */
+function corregirFoto(srcPath, dstPath) {
+  try {
+    const proc = spawnSync(PYTHON_EXE, [PHOTO_SCRIPT, srcPath, dstPath], {
+      timeout: 90_000, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024,
+    });
+    if (proc.status !== 0) return { aplicado: false };
+    const info = JSON.parse((proc.stdout || '').trim());
+    return info.error ? { aplicado: false } : info;
+  } catch (_) {
+    // Si el corrector falla, seguir con el camino normal es mejor que abortar
+    return { aplicado: false };
+  }
+}
 const PARSE_SCRIPT = path.join(__dirname, 'parse_mxl.py');
 
 // Devuelve la partitura completa: notas, voces, MusicXML y metadatos.
@@ -235,23 +262,32 @@ app.post('/api/omr', upload.single('file'), async (req, res) => {
   let srcW = 0, srcH = 0;
   // Se mide sobre el original, antes de ampliar: ampliar no añade información
   const interlinea = await medirInterlinea(rawPath);
+
+  // Si viene de una cámara, se corrige antes de nada. El resultado sustituye a
+  // la imagen de partida para el resto del proceso.
+  const foto = corregirFoto(rawPath, path.join(tmpDir, 'foto_corregida.png'));
+  const fuente = foto.aplicado ? path.join(tmpDir, 'foto_corregida.png') : rawPath;
+  if (foto.aplicado) {
+    console.log('[foto] corregida:', JSON.stringify(foto.señales || {}));
+  }
+
   try {
-    const meta = await sharp(rawPath).metadata();
+    const meta = await sharp(fuente).metadata();
     srcW = meta.width || 0;
     srcH = meta.height || 0;
     const w = meta.width || 1000;
     // Scale to at least 2400px wide — Audiveris needs thick, visible staff lines
     const targetW = Math.max(w, 2400);
-    await sharp(rawPath)
-      .resize({ width: targetW, kernel: 'lanczos3' })
-      .grayscale()
-      .normalise()
-      .sharpen({ sigma: 1.5 })   // enhance line edges without breaking them
-      .png({ compressionLevel: 0 })
-      .toFile(imgPath);
+    let img = sharp(fuente).resize({ width: targetW, kernel: 'lanczos3' }).grayscale();
+    // El corrector de foto ya normaliza luz y escala; repetirlo aquí solo
+    // añadiría artefactos sobre una imagen que ya viene tratada
+    if (!foto.aplicado) {
+      img = img.normalise().sharpen({ sigma: 1.5 });
+    }
+    await img.png({ compressionLevel: 0 }).toFile(imgPath);
   } catch (preprocessErr) {
     console.error('[preprocess]', preprocessErr.message);
-    fs.copyFileSync(rawPath, imgPath);
+    fs.copyFileSync(fuente, imgPath);
   }
   try {
     {
@@ -324,6 +360,12 @@ app.post('/api/omr', upload.single('file'), async (req, res) => {
       measures:      score.measures,
       engine:        'audiveris+notation',
       quality:       aviso,
+      photo:         foto.aplicado ? {
+        anguloCorregido: foto.anguloCorregido,
+        perspectivaCorregida: foto.perspectivaCorregida,
+        interlineaAntes: foto.interlineaAntes,
+        interlineaDespues: foto.interlineaDespues,
+      } : null,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
