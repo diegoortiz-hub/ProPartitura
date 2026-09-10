@@ -119,11 +119,12 @@ síntesis de prueba, y cada nota añade tokens que decodificar.
 | Motor | Estado | Notas |
 |---|---|---|
 | **Audiveris** (imagen) | ✅ Funciona | Java 21. Necesita imágenes de ≥1000 px de ancho |
-| **MR-MT3** (audio) | ✅ Funciona | 176 MB. Precargado al arrancar |
+| **CNN piano** (audio) | ✅ **Por defecto** | 165 MB. Coste lineal, 0.85× tiempo real. Precargado |
+| **MR-MT3** (audio) | ✅ Opcional | 176 MB. Multi-instrumento pero 5× más caro. Carga bajo demanda |
 | **music21** | ✅ Funciona | Toda la notación |
 | **OSMD** (grabado) | ✅ Funciona | 152 ms para 4 compases × 2 partes |
 | **Oemer** (imagen) | ❌ Roto | ONNX incompatible con onnxruntime 1.29 en Python 3.12 |
-| **piano_transcription** | ❌ Sin checkpoint | El `.pth` nunca se descargó; `health` reporta `omnizart:false` |
+| **Basic Pitch (browser)** | ✅ Fallback | TF.js en el navegador; coste cero para el servidor |
 | **Basic Pitch (Python)** | ❌ No instala | `note_seq` usa `pkgutil.ImpImporter`, removido en 3.12 |
 
 ---
@@ -195,6 +196,61 @@ evidencia. Una métrica insensible a la densidad de rejilla es el camino.
 ---
 
 ## Lo que queda abierto
+
+### 0. Despliegue en VPS — resuelto cambiando de clase de modelo
+
+**El problema no era MT3 sino su arquitectura.** MT3 es un transformer
+autorregresivo: decodifica token a token, así que su coste crece con el número
+de notas y escala **superlineal** con la densidad polifónica. Un transcriptor
+CNN hace una sola pasada hacia delante: coste **lineal** en la duración.
+
+Medido en la misma máquina, mismo audio, sin contención:
+
+| audio | CNN | MT3 | ventaja |
+|---|---|---|---|
+| 12 s | 14.0 s (1.16×) | 25.7 s (2.14×) | 1.8× |
+| 30 s | 23.2 s (**0.77×**) | 115.8 s (3.86×) | **5.0×** |
+| 60 s | 51.2 s (**0.85×**) | 262.3 s (4.37×) | **5.1×** |
+
+Fíjese en la progresión de MT3: 2.14 → 3.86 → 4.37. No es ruido, es el coste
+autorregresivo componiéndose. Sus 262 s explican exactamente los 277 s que se
+observaron con una grabación real de la Novena.
+
+#### Proyección a un VPS
+
+El escalado con hilos está medido (12 s de audio denso): 1→55.8 s, 2→33.1 s,
+4→24.0 s, 8→20.0 s. Extrapolando a 60 s de audio:
+
+| vCPU | MT3 | CNN |
+|---|---|---|
+| 2 | ~7 min | ~85 s |
+| 4 | ~5 min | ~60 s |
+| 8 | ~4.4 min | ~51 s |
+
+Con MT3, dos usuarios simultáneos en un VPS de 2 vCPU es inviable. Con el CNN
+el servicio responde.
+
+#### Lo que se hizo
+
+- **El CNN es el motor por defecto.** `/api/audio-transcribe` pasa por el mismo
+  pipeline de notación que MT3 y devuelve notas, voces y MusicXML.
+- **MT3 queda opcional** (`preferMT3`), para multi-instrumento asumiendo el coste.
+- **Se precarga el CNN, no MT3.** El CNN carga en ~4 s; MT3 tarda ~43 s y ocupa
+  unos 400 MB que no tiene sentido reservar para un motor opcional.
+- **Descarga del checkpoint portable.** La librería lo bajaba con
+  `os.system('wget ...')`, que no existe en Windows ni está garantizado en una
+  imagen mínima de servidor. Ahora usa `urllib`.
+
+Verificado: 820 MB de RAM en total, listo a los 12 s de arrancar, 30 s de audio
+transcritos en 27.4 s.
+
+#### El compromiso, dicho claro
+
+El CNN está entrenado con piano: interpreta como piano lo que oiga. Para piano
+solo o melodía dominante es la elección correcta y además la rápida. Para una
+orquesta dará una reducción pianística, no una partitura orquestal — pero MT3
+tampoco daba una partitura orquestal decente, solo tardaba cinco veces más en
+no darla.
 
 ### 1. Rendimiento de MT3 — sin atajo disponible
 

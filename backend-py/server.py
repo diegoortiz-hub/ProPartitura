@@ -52,15 +52,72 @@ def get_mt3_model():
     return _mt3_model
 
 
+_PT_CKPT = os.path.join(
+    os.path.expanduser("~"),
+    "piano_transcription_inference_data",
+    "note_F1=0.9677_pedal_F1=0.9186.pth",
+)
+_PT_URL = ("https://zenodo.org/record/4034264/files/"
+           "CRNN_note_F1%3D0.9677_pedal_F1%3D0.9186.pth?download=1")
+_pt_model = None
+_pt_lock = threading.Lock()
+
+
+def ensure_pt_checkpoint() -> bool:
+    """
+    Descarga el checkpoint del CNN si falta.
+
+    La librería lo baja con `os.system('wget ...')`, que no existe en Windows y
+    tampoco está garantizado en una imagen mínima de servidor. Se hace con
+    urllib para que funcione en cualquier sitio donde corra Python.
+    """
+    if os.path.exists(_PT_CKPT) and os.path.getsize(_PT_CKPT) > 100 * 1024 * 1024:
+        return True
+    os.makedirs(os.path.dirname(_PT_CKPT), exist_ok=True)
+    try:
+        import urllib.request
+        tmp = _PT_CKPT + ".part"
+        print("[CNN] descargando checkpoint (~165 MB)...")
+        urllib.request.urlretrieve(_PT_URL, tmp)
+        os.replace(tmp, _PT_CKPT)
+        print("[CNN] checkpoint listo")
+        return True
+    except Exception as e:
+        print(f"[CNN] no se pudo descargar el checkpoint: {e}")
+        return False
+
+
+def get_pt_model():
+    """Modelo CNN cacheado. Feed-forward: coste lineal, ~0.85x tiempo real."""
+    global _pt_model
+    if _pt_model is not None:
+        return _pt_model
+    with _pt_lock:
+        if _pt_model is not None:
+            return _pt_model
+        if not ensure_pt_checkpoint():
+            raise RuntimeError("Falta el checkpoint del transcriptor CNN.")
+        from piano_transcription_inference import PianoTranscription
+        _pt_model = PianoTranscription(device="cpu", checkpoint_path=_PT_CKPT)
+    return _pt_model
+
+
 @app.on_event("startup")
-def _warm_mt3():
-    """Precarga MR-MT3 en background para que la primera petición no tarde 60 s."""
+def _warm_models():
+    """
+    Precarga el motor por defecto en background.
+
+    Se precarga el CNN y **no** MT3: el CNN carga en ~4 s y ocupa poco, mientras
+    que MT3 tarda ~43 s y se lleva unos 400 MB. En un servidor modesto no tiene
+    sentido reservar esa memoria para un motor opcional, así que MT3 se carga
+    solo si alguien lo pide de verdad.
+    """
     def _load():
         try:
-            get_mt3_model()
-            print("[MT3] modelo MR-MT3 listo en memoria")
+            get_pt_model()
+            print("[CNN] transcriptor listo en memoria")
         except Exception as e:
-            print(f"[MT3] fallo al precargar: {e}")
+            print(f"[CNN] fallo al precargar: {e}")
     threading.Thread(target=_load, daemon=True).start()
 
 PYTHON     = os.path.join(os.path.dirname(__file__), ".venv", "Scripts", "python.exe")
@@ -425,17 +482,23 @@ async def mt3_transcribe(file: UploadFile = File(...), seconds: int = 60):
 
 
 @app.post("/api/audio-transcribe")
-async def audio_transcribe(file: UploadFile = File(...)):
+async def audio_transcribe(file: UploadFile = File(...), seconds: int = 60):
     """
-    Transcripción con piano_transcription_inference (deep learning).
-    Mucho mejor que pyin para audio musical real.
-    Funciona en CPU. Descarga modelo ~130MB en el primer uso.
+    Transcripción con un CNN (Kong et al.) más el pipeline de notación.
+
+    Es el motor por defecto porque su coste es **lineal** en la duración y va por
+    debajo del tiempo real: medido 0.85x contra el 4.37x de MT3 con 60 s de audio
+    denso. MT3 decodifica token a token, así que su coste se dispara con la
+    densidad polifónica; este hace una sola pasada hacia delante.
+
+    A cambio está entrenado con piano: interpreta lo que oiga como si lo fuera.
+    Para piano solo o melodía dominante es la elección correcta.
     """
-    import sys
-    from piano_transcription_inference import PianoTranscription, sample_rate as PT_SR
+    from piano_transcription_inference import sample_rate as PT_SR
 
     suffix  = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
     content = await file.read()
+    secs = max(10, min(int(seconds), 300))
 
     with tempfile.TemporaryDirectory() as tmpdir:
         audio_path = os.path.join(tmpdir, f"input{suffix}")
@@ -443,34 +506,60 @@ async def audio_transcribe(file: UploadFile = File(...)):
         with open(audio_path, "wb") as f:
             f.write(content)
 
-        # Cargar audio al sample rate que necesita el modelo (16kHz)
         try:
-            audio, _ = librosa.load(audio_path, sr=PT_SR, mono=True, duration=60.0)
+            audio, _ = librosa.load(audio_path, sr=PT_SR, mono=True, duration=float(secs))
         except Exception as e:
             raise HTTPException(status_code=422, detail=f"No se pudo leer el audio: {e}")
 
+        # Tempo, tonalidad y compás salen del audio, igual que en la ruta de MT3
+        tempo_val, key_name, mode, key_sig, time_sig = 120, "C", "major", {"flats": [], "sharps": []}, "4/4"
+        meter_conf = 0.0
         try:
-            transcriptor = PianoTranscription(device="cpu", checkpoint_path=None)
-            transcriptor.transcribe(audio, midi_path)
+            import rhythm
+            y22, sr22 = librosa.load(audio_path, sr=22050, mono=True, duration=float(secs))
+            r = rhythm.analyze(y22, sr22)
+            tempo_val  = r["tempo"] or 120
+            time_sig   = r["timeSignature"]
+            meter_conf = r["meterConfidence"]
+            key_name, mode, key_sig = detect_key(y22, sr22)
+        except Exception:
+            pass
+
+        try:
+            get_pt_model().transcribe(audio, midi_path)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error de transcripción: {e}")
 
         if not os.path.exists(midi_path):
             raise HTTPException(status_code=422, detail="El modelo no produjo MIDI.")
 
-        notes = _midi_to_notes_music21(midi_path)
+        try:
+            import notation
+            result = notation.midi_to_notated_score(
+                midi_path, real_bpm=float(tempo_val),
+                ts_str=time_sig, detected_key=key_name,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error de notación: {e}")
 
-    if not notes:
+    if not result["notes"]:
         raise HTTPException(status_code=422, detail="No se detectaron notas en el audio.")
 
-    # Extraer tempo básico para el frontend
-    try:
-        tempo_arr, _ = librosa.beat.beat_track(y=audio, sr=PT_SR)
-        tempo = int(float(tempo_arr))
-    except Exception:
-        tempo = 120
-
-    return {"notes": notes, "engine": "piano_transcription+music21", "tempo": tempo}
+    return {
+        "notes":         result["notes"],
+        "voices":        result["voices"],
+        "musicXml":      result["musicXml"],
+        "engine":        "piano_cnn+notation",
+        "tempo":         tempo_val,
+        "timeSignature": time_sig,
+        "key":           key_name,
+        "mode":          mode,
+        "keyLabel":      f"{key_name} {mode}",
+        "keySignature":  key_sig,
+        "measures":      result["measures"],
+        "meterConfidence": meter_conf,
+        "secondsAnalyzed": secs,
+    }
 
 
 @app.get("/api/health")
@@ -490,17 +579,14 @@ def health():
         mt3_ok = True
     except ImportError:
         mt3_ok = False
-    # piano_transcription solo sirve si su checkpoint ya está descargado;
-    # si falta, el frontend debe saltarse ese motor en vez de recibir un 500.
-    pt_ckpt = os.path.join(
-        os.path.expanduser("~"),
-        "piano_transcription_inference_data",
-        "note_F1=0.9677_pedal_F1=0.9186.pth",
-    )
-    pt_ok = os.path.exists(pt_ckpt)
+    # El CNN es el motor por defecto: coste lineal y por debajo del tiempo real.
+    # Se reporta descargable aunque falte el checkpoint, porque ahora se baja
+    # solo con urllib en la primera petición.
+    pt_ok = os.path.exists(_PT_CKPT)
     return {
         "status": "ok", "engine": "librosa",
-        "omnizart": pt_ok, "demucs": demucs_ok,
+        "omnizart": True, "cnnReady": pt_ok, "cnnLoaded": _pt_model is not None,
+        "demucs": demucs_ok,
         "oemer": oemer_ok, "mt3": mt3_ok,
         # loaded=True → la transcripción responde en ~3 s; False → primera vez ~60 s
         "mt3Loaded": _mt3_model is not None,

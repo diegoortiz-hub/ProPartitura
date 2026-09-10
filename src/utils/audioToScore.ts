@@ -71,22 +71,23 @@ async function transcribeWithMT3(file: File, seconds = 60): Promise<ImportedScor
   }
 }
 
-async function transcribeWithOmnizart(file: File, _bpm: number): Promise<ImportedNote[]> {
+async function transcribeWithCNN(file: File, seconds = 60): Promise<ImportedScore> {
   const form = new FormData();
   form.append('file', file);
   const ctrl = new AbortController();
-  // piano_transcription_inference tarda ~60-90s en CPU la primera vez
-  const t = setTimeout(() => ctrl.abort(), 180_000);
+  // Medido: 0.85x la duración del audio, escala lineal. El margen cubre la
+  // descarga del checkpoint (~165 MB) la primera vez que se usa.
+  const budget = Math.max(240_000, seconds * 1000 * 3);
+  const t = setTimeout(() => ctrl.abort(), budget);
   try {
-    const res = await fetch(`${OMNIZART_URL}/api/audio-transcribe`, {
+    const res = await fetch(`${OMNIZART_URL}/api/audio-transcribe?seconds=${seconds}`, {
       method: 'POST', body: form, signal: ctrl.signal,
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail ?? `HTTP ${res.status}`);
     }
-    const { notes } = await res.json();
-    return notes as ImportedNote[];
+    return (await res.json()) as ImportedScore;
   } finally {
     clearTimeout(t);
   }
@@ -182,10 +183,28 @@ export async function audioFileToScore(
   bpm = 120,
   onProgress?: (engine: AudioEngine, pct: number) => void,
   seconds = 60,
+  /** Fuerza MT3 (multi-instrumento) aceptando que tardará ~5x más. */
+  preferMT3 = false,
 ): Promise<TranscribeResult> {
   const health = await backendHealth();
 
-  // Motor 1: MR-MT3 + pipeline de notación (mejor calidad)
+  // Motor 1: CNN. Va primero por coste, no por catálogo de instrumentos: su
+  // tiempo es lineal en la duración y queda por debajo del tiempo real (0.85x
+  // medido), mientras MT3 escala superlineal con la densidad polifónica (4.37x
+  // a 60 s). En un servidor modesto es la diferencia entre responder y agotar
+  // el tiempo de espera.
+  if (health.omnizart && !preferMT3) {
+    onProgress?.('omnizart', 0);
+    try {
+      const score = await transcribeWithCNN(file, seconds);
+      onProgress?.('omnizart', 100);
+      return { ...score, engine: 'omnizart' };
+    } catch (e) {
+      console.warn('[OMR] CNN falló, probando MT3:', e);
+    }
+  }
+
+  // Motor 2: MR-MT3. Multi-instrumento, pero mucho más caro.
   if (health.mt3) {
     onProgress?.('omnizart', 0);
     try {
@@ -193,19 +212,7 @@ export async function audioFileToScore(
       onProgress?.('omnizart', 100);
       return { ...score, engine: 'omnizart' };
     } catch (e) {
-      console.warn('[OMR] MT3 falló, probando piano_transcription:', e);
-    }
-  }
-
-  // Motor 2: piano_transcription_inference (piano, CPU)
-  if (health.omnizart) {
-    onProgress?.('omnizart', 0);
-    try {
-      const notes = await transcribeWithOmnizart(file, bpm);
-      onProgress?.('omnizart', 100);
-      return { notes, engine: 'omnizart' };
-    } catch (e) {
-      console.warn('[OMR] piano_transcription falló, usando Basic-Pitch:', e);
+      console.warn('[OMR] MT3 falló, usando Basic-Pitch:', e);
     }
   }
 
