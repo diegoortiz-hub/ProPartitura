@@ -1,0 +1,4 @@
+# Audios subidos, en espera de que el trabajador los procese.
+# Se borran al terminar cada encargo y al arrancar el servidor.
+*
+!.gitignore

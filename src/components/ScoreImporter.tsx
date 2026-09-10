@@ -151,13 +151,15 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
         setStatus('done');
 
       } else {
-        // El backend no informa de su avance, así que se estima por tiempo.
-        // Medido en CPU con material denso: ~1.7x la duración del audio. Sin
-        // esto la barra se queda en 0% durante minutos y parece un cuelgue.
+        // La cola informa de su avance real: posición y porcentaje del trabajo.
+        // Solo se estima por tiempo si el backend no la tiene.
         const secs = Math.min(await audioDuration(file), clipSeconds);
-        const eta  = secs * 1.7 + 10;
+        const eta  = secs * 1.0 + 10;
         const t0   = Date.now();
+        let conCola = false;
+
         const tick = window.setInterval(() => {
+          if (conCola) return;              // la cola manda datos mejores
           const pct = Math.min(95, ((Date.now() - t0) / 1000 / eta) * 100);
           setProgress(Math.round(pct));
           setProgressMsg(
@@ -167,7 +169,24 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
 
         let res;
         try {
-          res = await audioFileToScore(file, 120, (eng) => setEngine(eng), clipSeconds);
+          res = await audioFileToScore(
+            file, 120, (eng) => setEngine(eng), clipSeconds, false,
+            (job) => {
+              conCola = true;
+              if (job.status === 'queued') {
+                setProgress(0);
+                const espera = job.waitSeconds ?? 0;
+                setProgressMsg(
+                  job.position && job.position > 1
+                    ? `En cola: ${job.position}º de la fila · ~${espera} s de espera`
+                    : `En cola · empieza en ~${espera} s`
+                );
+              } else if (job.status === 'running') {
+                setProgress(job.progress ?? 0);
+                setProgressMsg(`Transcribiendo... quedan ~${job.etaSeconds ?? 0} s`);
+              }
+            },
+          );
         } finally {
           clearInterval(tick);
           setProgressMsg('');

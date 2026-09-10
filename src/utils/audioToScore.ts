@@ -35,7 +35,12 @@ const MAX_AUDIO_SEC = 30; // limita el audio para no colgar el browser
 
 // ─── Motor 1: Omnizart ───────────────────────────────────────────────────────
 
-interface HealthInfo { omnizart?: boolean; mt3?: boolean }
+interface HealthInfo {
+  omnizart?: boolean;
+  mt3?: boolean;
+  /** Presente si el backend tiene cola de trabajos. */
+  queue?: { queued: number; running: number; maxQueued: number };
+}
 
 async function backendHealth(): Promise<HealthInfo> {
   try {
@@ -69,6 +74,70 @@ async function transcribeWithMT3(file: File, seconds = 60): Promise<ImportedScor
   } finally {
     clearTimeout(t);
   }
+}
+
+/** Avance de un encargo en la cola del servidor. */
+export interface JobProgress {
+  status: 'queued' | 'running' | 'done' | 'error';
+  position?: number;
+  waitSeconds?: number;
+  etaSeconds?: number;
+  progress?: number;
+}
+
+/**
+ * Encola la transcripción y sigue su avance hasta tener el resultado.
+ *
+ * La subida devuelve un identificador en milisegundos; el trabajo ocurre aparte.
+ * Así ninguna petición HTTP queda abierta más de un instante —nginx corta a los
+ * 60 s por defecto— y varias transcripciones no compiten por los mismos núcleos.
+ */
+async function transcribeViaQueue(
+  file: File,
+  seconds: number,
+  engine: 'cnn' | 'mt3',
+  onJob?: (p: JobProgress) => void,
+  signal?: AbortSignal,
+): Promise<ImportedScore> {
+  const form = new FormData();
+  form.append('file', file);
+
+  const res = await fetch(
+    `${OMNIZART_URL}/api/jobs/transcribe?seconds=${seconds}&engine=${engine}`,
+    { method: 'POST', body: form, signal },
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail ?? `HTTP ${res.status}`);
+  }
+  const { jobId } = await res.json();
+  if (!jobId) throw new Error('El servidor no devolvió identificador de trabajo.');
+
+  // Margen generoso: cubre la cola además del trabajo propio
+  const limite = Date.now() + Math.max(600_000, seconds * 1000 * 12);
+
+  while (Date.now() < limite) {
+    if (signal?.aborted) {
+      // Liberar el sitio en la cola si aún no había empezado
+      fetch(`${OMNIZART_URL}/api/jobs/${jobId}`, { method: 'DELETE' }).catch(() => {});
+      throw new DOMException('Cancelado', 'AbortError');
+    }
+
+    await new Promise(r => setTimeout(r, 1500));
+
+    const st = await fetch(`${OMNIZART_URL}/api/jobs/${jobId}`, { signal });
+    if (!st.ok) {
+      if (st.status === 404) throw new Error('El trabajo caducó en el servidor.');
+      continue;                       // fallo puntual de red: se reintenta
+    }
+    const snap = await st.json();
+    onJob?.(snap as JobProgress);
+
+    if (snap.status === 'done')  return snap.result as ImportedScore;
+    if (snap.status === 'error') throw new Error(snap.error ?? 'Error de transcripción.');
+    if (snap.status === 'cancelled') throw new Error('Trabajo cancelado.');
+  }
+  throw new Error('El trabajo tardó más de lo previsto. Prueba con menos duración.');
 }
 
 async function transcribeWithCNN(file: File, seconds = 60): Promise<ImportedScore> {
@@ -185,8 +254,24 @@ export async function audioFileToScore(
   seconds = 60,
   /** Fuerza MT3 (multi-instrumento) aceptando que tardará ~5x más. */
   preferMT3 = false,
+  /** Posición en la cola y avance real del servidor. */
+  onJob?: (p: JobProgress) => void,
 ): Promise<TranscribeResult> {
   const health = await backendHealth();
+
+  // Vía preferente: la cola. No bloquea la petición ni compite por los núcleos.
+  if (health.queue) {
+    onProgress?.('omnizart', 0);
+    try {
+      const score = await transcribeViaQueue(
+        file, seconds, preferMT3 ? 'mt3' : 'cnn', onJob);
+      onProgress?.('omnizart', 100);
+      return { ...score, engine: 'omnizart' };
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') throw e;
+      console.warn('[OMR] la cola falló, se intenta el modo directo:', e);
+    }
+  }
 
   // Motor 1: CNN. Va primero por coste, no por catálogo de instrumentos: su
   // tiempo es lineal en la duración y queda por debajo del tiempo real (0.85x

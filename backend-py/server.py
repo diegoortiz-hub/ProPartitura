@@ -12,6 +12,7 @@ import os
 import tempfile
 import subprocess
 import threading
+import uuid
 import numpy as np
 import librosa
 import soundfile as sf
@@ -481,85 +482,220 @@ async def mt3_transcribe(file: UploadFile = File(...), seconds: int = 60):
     }
 
 
+def _analyze_context(audio_path: str, secs: int) -> dict:
+    """
+    Tempo, compás y tonalidad del audio.
+
+    Se saca del audio y no del MIDI transcrito porque el MIDI viene en el marco
+    de tempo del modelo, no en el de la pieza.
+    """
+    ctx = {
+        "tempo": 120, "key": "C", "mode": "major",
+        "keySignature": {"flats": [], "sharps": []},
+        "timeSignature": "4/4", "meterConfidence": 0.0,
+    }
+    try:
+        import rhythm
+        y22, sr22 = librosa.load(audio_path, sr=22050, mono=True, duration=float(secs))
+        r = rhythm.analyze(y22, sr22)
+        key_name, mode, key_sig = detect_key(y22, sr22)
+        ctx.update({
+            "tempo": r["tempo"] or 120,
+            "timeSignature": r["timeSignature"],
+            "meterConfidence": r["meterConfidence"],
+            "key": key_name, "mode": mode, "keySignature": key_sig,
+        })
+    except Exception:
+        pass
+    return ctx
+
+
+def run_audio_transcription(audio_path: str, secs: int, engine: str = "cnn") -> dict:
+    """
+    Transcribe un archivo ya guardado en disco. Sin dependencias de FastAPI para
+    que pueda ejecutarla el trabajador de la cola igual que un endpoint.
+
+    engine="cnn"  → coste lineal, 0.85x tiempo real. El predeterminado.
+    engine="mt3"  → multi-instrumento, pero escala superlineal con la densidad.
+    """
+    ctx = _analyze_context(audio_path, secs)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        midi_path = os.path.join(tmpdir, "out.mid")
+
+        if engine == "mt3":
+            y, _ = librosa.load(audio_path, sr=16000, mono=True, duration=float(secs))
+            get_mt3_model().transcribe(y, sr=16000).save(midi_path)
+            engine_label = "mr_mt3+notation"
+        else:
+            from piano_transcription_inference import sample_rate as PT_SR
+            audio, _ = librosa.load(audio_path, sr=PT_SR, mono=True, duration=float(secs))
+            get_pt_model().transcribe(audio, midi_path)
+            engine_label = "piano_cnn+notation"
+
+        if not os.path.exists(midi_path):
+            raise RuntimeError("El modelo no produjo MIDI.")
+
+        import notation
+        result = notation.midi_to_notated_score(
+            midi_path, real_bpm=float(ctx["tempo"]),
+            ts_str=ctx["timeSignature"], detected_key=ctx["key"],
+        )
+
+    if not result["notes"]:
+        raise RuntimeError("No se detectaron notas en el audio.")
+
+    return {
+        "notes":    result["notes"],
+        "voices":   result["voices"],
+        "musicXml": result["musicXml"],
+        "engine":   engine_label,
+        "measures": result["measures"],
+        "keyLabel": f"{ctx['key']} {ctx['mode']}",
+        "secondsAnalyzed": secs,
+        **{k: ctx[k] for k in ("tempo", "timeSignature", "key", "mode",
+                               "keySignature", "meterConfidence")},
+    }
+
+
 @app.post("/api/audio-transcribe")
 async def audio_transcribe(file: UploadFile = File(...), seconds: int = 60):
     """
-    Transcripción con un CNN (Kong et al.) más el pipeline de notación.
-
-    Es el motor por defecto porque su coste es **lineal** en la duración y va por
-    debajo del tiempo real: medido 0.85x contra el 4.37x de MT3 con 60 s de audio
-    denso. MT3 decodifica token a token, así que su coste se dispara con la
-    densidad polifónica; este hace una sola pasada hacia delante.
-
-    A cambio está entrenado con piano: interpreta lo que oiga como si lo fuera.
-    Para piano solo o melodía dominante es la elección correcta.
+    Transcripción síncrona con el CNN. Se conserva por compatibilidad; para
+    producción conviene `/api/jobs/transcribe`, que no bloquea la petición.
     """
-    from piano_transcription_inference import sample_rate as PT_SR
-
     suffix  = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
     content = await file.read()
     secs = max(10, min(int(seconds), 300))
 
     with tempfile.TemporaryDirectory() as tmpdir:
         audio_path = os.path.join(tmpdir, f"input{suffix}")
-        midi_path  = os.path.join(tmpdir, "transcribed.mid")
         with open(audio_path, "wb") as f:
             f.write(content)
-
         try:
-            audio, _ = librosa.load(audio_path, sr=PT_SR, mono=True, duration=float(secs))
-        except Exception as e:
-            raise HTTPException(status_code=422, detail=f"No se pudo leer el audio: {e}")
-
-        # Tempo, tonalidad y compás salen del audio, igual que en la ruta de MT3
-        tempo_val, key_name, mode, key_sig, time_sig = 120, "C", "major", {"flats": [], "sharps": []}, "4/4"
-        meter_conf = 0.0
-        try:
-            import rhythm
-            y22, sr22 = librosa.load(audio_path, sr=22050, mono=True, duration=float(secs))
-            r = rhythm.analyze(y22, sr22)
-            tempo_val  = r["tempo"] or 120
-            time_sig   = r["timeSignature"]
-            meter_conf = r["meterConfidence"]
-            key_name, mode, key_sig = detect_key(y22, sr22)
-        except Exception:
-            pass
-
-        try:
-            get_pt_model().transcribe(audio, midi_path)
+            return run_audio_transcription(audio_path, secs, "cnn")
+        except RuntimeError as e:
+            raise HTTPException(status_code=422, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error de transcripción: {e}")
 
-        if not os.path.exists(midi_path):
-            raise HTTPException(status_code=422, detail="El modelo no produjo MIDI.")
 
+# ─── Cola de trabajos ────────────────────────────────────────────────────────
+# Los archivos subidos viven aquí hasta que el trabajador los procesa: la
+# petición HTTP termina antes de que empiece el trabajo, así que no vale un
+# directorio temporal atado a su ciclo de vida.
+JOBS_DIR = os.path.join(os.path.dirname(__file__), "jobs_tmp")
+os.makedirs(JOBS_DIR, exist_ok=True)
+
+
+def _job_handler(kind: str, payload: dict):
+    """Ejecuta un encargo. Corre en el hilo trabajador, no en el del servidor."""
+    if kind == "audio":
+        return run_audio_transcription(
+            payload["path"], payload["seconds"], payload.get("engine", "cnn"))
+    raise ValueError(f"Tipo de trabajo desconocido: {kind}")
+
+
+def _limpiar_huerfanos() -> None:
+    """
+    Borra los audios de encargos que un reinicio dejó a medias.
+
+    La cola vive en memoria, así que al reiniciar se pierde lo que hubiera
+    pendiente pero sus archivos siguen en disco. Sin esta limpieza el directorio
+    crece con cada reinicio hasta llenar el disco del servidor.
+    """
+    try:
+        n = 0
+        for f in os.listdir(JOBS_DIR):
+            # Los archivos que empiezan por punto son configuración del
+            # directorio (.gitignore), no audios de encargos
+            if f.startswith("."):
+                continue
+            p = os.path.join(JOBS_DIR, f)
+            if os.path.isfile(p):
+                os.unlink(p)
+                n += 1
+        if n:
+            print(f"[jobs] {n} archivo(s) huérfano(s) de un reinicio anterior, borrados")
+    except OSError as e:
+        print(f"[jobs] no se pudo limpiar {JOBS_DIR}: {e}")
+
+
+_limpiar_huerfanos()
+
+import jobs as _jobs  # noqa: E402
+JOB_QUEUE = _jobs.JobQueue(_job_handler)
+
+# Coste medido por segundo de audio. El CNN es lineal (0.85x); MT3 escala
+# superlineal con la densidad, de ahí el factor mucho mayor y conservador.
+_ETA_POR_SEGUNDO = {"cnn": 0.95, "mt3": 4.5}
+
+
+@app.post("/api/jobs/transcribe")
+async def jobs_transcribe(
+    file: UploadFile = File(...), seconds: int = 60, engine: str = "cnn",
+):
+    """
+    Encola una transcripción y responde de inmediato con su identificador.
+
+    La petición dura milisegundos, lo que evita que nginx la corte a los 60 s
+    —su valor por defecto— y que varias transcripciones compitan por los mismos
+    núcleos.
+    """
+    secs = max(10, min(int(seconds), 300))
+    eng = "mt3" if engine == "mt3" else "cnn"
+
+    suffix = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Archivo vacío.")
+
+    path = os.path.join(JOBS_DIR, f"{uuid.uuid4().hex[:12]}{suffix}")
+    with open(path, "wb") as f:
+        f.write(content)
+
+    try:
+        job = JOB_QUEUE.submit(
+            "audio",
+            {"path": path, "seconds": secs, "engine": eng},
+            eta=secs * _ETA_POR_SEGUNDO[eng] + 6,
+        )
+    except _jobs.QueueFull as e:
         try:
-            import notation
-            result = notation.midi_to_notated_score(
-                midi_path, real_bpm=float(tempo_val),
-                ts_str=time_sig, detected_key=key_name,
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error de notación: {e}")
+            os.unlink(path)
+        except OSError:
+            pass
+        raise HTTPException(
+            status_code=503,
+            detail=f"El servidor está saturado ({e}). Inténtalo en unos minutos.",
+        )
 
-    if not result["notes"]:
-        raise HTTPException(status_code=422, detail="No se detectaron notas en el audio.")
+    return {"jobId": job.id, **(JOB_QUEUE.snapshot(job.id) or {})}
 
-    return {
-        "notes":         result["notes"],
-        "voices":        result["voices"],
-        "musicXml":      result["musicXml"],
-        "engine":        "piano_cnn+notation",
-        "tempo":         tempo_val,
-        "timeSignature": time_sig,
-        "key":           key_name,
-        "mode":          mode,
-        "keyLabel":      f"{key_name} {mode}",
-        "keySignature":  key_sig,
-        "measures":      result["measures"],
-        "meterConfidence": meter_conf,
-        "secondsAnalyzed": secs,
-    }
+
+@app.get("/api/jobs/{job_id}")
+def jobs_status(job_id: str):
+    """Estado del encargo: posición en la cola, avance o resultado."""
+    snap = JOB_QUEUE.snapshot(job_id)
+    if snap is None:
+        raise HTTPException(status_code=404, detail="Ese trabajo no existe o ya caducó.")
+    return snap
+
+
+@app.delete("/api/jobs/{job_id}")
+def jobs_cancel(job_id: str):
+    """Cancela un encargo que aún no ha empezado."""
+    if JOB_QUEUE.cancel(job_id):
+        return {"cancelled": True}
+    raise HTTPException(
+        status_code=409,
+        detail="No se puede cancelar: ya está en proceso o ha terminado.",
+    )
+
+
+@app.get("/api/jobs")
+def jobs_stats():
+    return JOB_QUEUE.stats()
 
 
 @app.get("/api/health")
@@ -586,6 +722,7 @@ def health():
     return {
         "status": "ok", "engine": "librosa",
         "omnizart": True, "cnnReady": pt_ok, "cnnLoaded": _pt_model is not None,
+        "queue": JOB_QUEUE.stats(),
         "demucs": demucs_ok,
         "oemer": oemer_ok, "mt3": mt3_ok,
         # loaded=True → la transcripción responde en ~3 s; False → primera vez ~60 s
