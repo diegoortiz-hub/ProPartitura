@@ -34,6 +34,12 @@ export interface ImportedScore {
    *  el usuario la revise: el compás compuesto es difícil de distinguir del
    *  simple solo por acentos. */
   meterConfidence?: number;
+  /** Aviso de resolución insuficiente en la imagen de origen. */
+  quality?: {
+    interlinea: number;
+    nivel: 'bajo' | 'critico';
+    mensaje: string;
+  } | null;
 }
 
 // Audiveris en Node (port 3001) — Oemer en Python (port 3002) como fallback.

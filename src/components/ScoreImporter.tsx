@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { Midi } from '@tonejs/midi';
-import { imageToScore, ImportedNote, ScoreVoice } from '../utils/imageToScore';
+import { imageToScore, ImportedNote, ScoreVoice, ImportedScore } from '../utils/imageToScore';
 import { audioFileToScore, audioFileToScoreFull, AudioEngine, OrchestraVoice, KeySignature } from '../utils/audioToScore';
 
 interface ScoreImporterProps {
@@ -79,6 +79,7 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
   // cuesta ~1.7x la duración en CPU, así que la decisión es del usuario.
   const [clipSeconds, setClipSeconds] = useState(60);
   const [allVoices, setAllVoices] = useState<ScoreVoice[] | undefined>(undefined);
+  const [quality, setQuality] = useState<ImportedScore['quality']>(null);
   const [midiTempo, setMidiTempo] = useState<number | null>(null);
   const [dragOver, setDrag]     = useState(false);
   const [fileName, setFile]     = useState('');
@@ -134,6 +135,7 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
         if (score.keyLabel)      setKeyLabel(score.keyLabel);
         setMusicXml(score.musicXml ?? null);
         setAllVoices(score.voices);
+        setQuality(score.quality ?? null);
         setProgress(100);
         setStatus('done');
 
@@ -458,6 +460,35 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
               </div>
 
               {/* Metadatos musicales detectados */}
+              {/* Resolución insuficiente: se avisa porque el resultado parece
+                  correcto de un vistazo —las alturas salen bien— y los ritmos
+                  no lo son. */}
+              {quality && (
+                <div className={`rounded-lg border px-3 py-2.5 mb-3 ${
+                  quality.nivel === 'critico'
+                    ? 'bg-red-500/8 border-red-500/25'
+                    : 'bg-amber-400/8 border-amber-400/25'
+                }`}>
+                  <div className="flex items-start gap-2">
+                    <span className={`material-symbols-outlined text-[16px] mt-px ${
+                      quality.nivel === 'critico' ? 'text-red-400' : 'text-amber-400'
+                    }`}>
+                      {quality.nivel === 'critico' ? 'error' : 'warning'}
+                    </span>
+                    <div>
+                      <p className={`text-[11px] font-semibold ${
+                        quality.nivel === 'critico' ? 'text-red-400' : 'text-amber-400'
+                      }`}>
+                        Resolución baja — los ritmos pueden no ser exactos
+                      </p>
+                      <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                        {quality.mensaje}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {(keyLabel || timeSig || detectedTempo) && (
                 <div className="bg-[#0C1220] border border-[#C8A84B]/20 rounded-lg p-3 flex flex-wrap gap-3 items-center">
                   {keyLabel && (

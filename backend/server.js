@@ -55,6 +55,78 @@ function getAudiverisCmd(tmpDir, imgPath) {
   return `"${java}" -jar "${bin}" ${args}`;
 }
 
+/**
+ * Mide el interlineado del pentagrama, en píxeles del archivo original.
+ *
+ * Es la medida que decide si una imagen sirve para OMR, y no los píxeles
+ * totales: de ella dependen el puntillo de aumento, el grosor del corchete y la
+ * distinción entre cabeza rellena y hueca, que son los rasgos que fijan la
+ * DURACIÓN de cada nota.
+ *
+ * Medido con partituras sintéticas de verdad conocida:
+ *   6.5 px → alturas 18/18, duraciones 18/18   (música sencilla)
+ *   5.0 px → alturas 17/18, duraciones 12/18   ← las duraciones caen primero
+ *   4.0 px → alturas  2/18, duraciones  5/18
+ *
+ * Las alturas aguantan mucho más porque salen de la POSICIÓN de la cabeza, que
+ * sobrevive al reescalado. Por eso una partitura de baja resolución sale con la
+ * melodía reconocible y el ritmo equivocado.
+ *
+ * Ampliar la imagen después no ayuda: interpolar un puntillo de 1.6 px a 6 px
+ * da un puntillo borroso más grande, no información que la cámara no capturó.
+ */
+async function medirInterlinea(imgPath) {
+  try {
+    const { data, info } = await sharp(imgPath)
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const { width: w, height: h } = info;
+    if (!w || h < 20) return null;
+
+    // Oscuridad media de cada fila: las líneas del pentagrama son filas oscuras
+    const osc = new Float64Array(h);
+    for (let y = 0; y < h; y++) {
+      let s = 0;
+      const base = y * w;
+      for (let x = 0; x < w; x++) s += 255 - data[base + x];
+      osc[y] = s / w;
+    }
+    let media = 0;
+    for (let y = 0; y < h; y++) media += osc[y];
+    media /= h;
+    let varianza = 0;
+    for (let y = 0; y < h; y++) varianza += (osc[y] - media) ** 2;
+    const sd = Math.sqrt(varianza / h);
+    const umbral = media + 1.6 * sd;
+
+    // Agrupar filas contiguas: cada grupo es una línea del pentagrama
+    const centros = [];
+    let grupo = [];
+    for (let y = 0; y < h; y++) {
+      if (osc[y] > umbral) grupo.push(y);
+      else if (grupo.length) {
+        centros.push(grupo.reduce((a, b) => a + b, 0) / grupo.length);
+        grupo = [];
+      }
+    }
+    if (grupo.length) centros.push(grupo.reduce((a, b) => a + b, 0) / grupo.length);
+    if (centros.length < 6) return null;
+
+    // La mediana de las distancias entre líneas consecutivas es el interlineado
+    const difs = [];
+    for (let i = 1; i < centros.length; i++) {
+      const d = centros[i] - centros[i - 1];
+      if (d > 1.5 && d < 60) difs.push(d);
+    }
+    if (difs.length < 4) return null;
+    difs.sort((a, b) => a - b);
+    return difs[Math.floor(difs.length / 2)];
+  } catch (_) {
+    return null;
+  }
+}
+
 // Python venv + script para parsear MXL con music21
 const PYTHON_EXE  = path.join(__dirname, '..', 'backend-py', '.venv', 'Scripts', 'python.exe');
 const PARSE_SCRIPT = path.join(__dirname, 'parse_mxl.py');
@@ -161,6 +233,8 @@ app.post('/api/omr', upload.single('file'), async (req, res) => {
   const tmpDir = fs.mkdtempSync(path.join(LOCAL_TMP, 'omr-'));
   const imgPath = path.join(tmpDir, 'score_processed.png');
   let srcW = 0, srcH = 0;
+  // Se mide sobre el original, antes de ampliar: ampliar no añade información
+  const interlinea = await medirInterlinea(rawPath);
   try {
     const meta = await sharp(rawPath).metadata();
     srcW = meta.width || 0;
@@ -215,6 +289,31 @@ app.post('/api/omr', upload.single('file'), async (req, res) => {
 
     if (!score.notes?.length) throw new Error('No se detectaron notas en la imagen. Prueba con una imagen más nítida.');
 
+    // Aviso de calidad: por debajo de ~6 px de interlineado las duraciones
+    // dejan de ser fiables aunque las alturas sigan saliendo bien. Conviene
+    // decirlo, porque el resultado parece correcto de un vistazo y no lo es.
+    // Umbrales según lo que recomienda el propio Audiveris (interlineado ≥ 16 px)
+    // y lo medido con partituras de verdad conocida: por debajo de 8 px las
+    // duraciones dejan de ser fiables aunque las alturas sigan bien.
+    let aviso = null;
+    if (interlinea !== null && interlinea < 14.0) {
+      const objetivo = Math.round(srcW * (16 / interlinea));
+      const critico = interlinea < 8.0;
+      aviso = {
+        interlinea: Math.round(interlinea * 10) / 10,
+        nivel: critico ? 'critico' : 'bajo',
+        mensaje: critico
+          ? `El pentagrama mide ${interlinea.toFixed(1)} px entre líneas, cuando ` +
+            'hacen falta 16. A esta resolución el puntillo de aumento ocupa ' +
+            `${(interlinea * 0.25).toFixed(1)} px y el corchete ${(interlinea * 0.5).toFixed(1)} px: ` +
+            'las alturas saldrán bien pero los ritmos no son fiables. ' +
+            `Usa una imagen de ~${objetivo} px de ancho o escanea a 300 dpi.`
+          : `El pentagrama mide ${interlinea.toFixed(1)} px entre líneas; lo ` +
+            'recomendable son 16. Puede haber errores en puntillos y ' +
+            `figuras rápidas. Ideal: ~${objetivo} px de ancho.`,
+      };
+    }
+
     res.json({
       notes:         score.notes,
       voices:        score.voices,
@@ -224,6 +323,7 @@ app.post('/api/omr', upload.single('file'), async (req, res) => {
       keyLabel:      score.keyLabel,
       measures:      score.measures,
       engine:        'audiveris+notation',
+      quality:       aviso,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
