@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as osmdPkg from 'opensheetmusicdisplay';
 import type { OpenSheetMusicDisplay as OSMDType } from 'opensheetmusicdisplay';
+import { playMidi } from '../utils/audio';
 
 // OSMD se publica como CommonJS y, según cómo lo empaquete el bundler, sus
 // clases quedan colgando de `default` en vez de exportarse por nombre. Los
@@ -21,6 +22,48 @@ interface ScoreRendererProps {
   onReady?: (measures: number) => void;
 }
 
+/** Una nota pulsable: dónde está en el papel y qué suena al tocarla. */
+interface NotaPulsable {
+  ux: number;      // posición en unidades de OSMD, no en píxeles
+  uy: number;
+  midis: number[]; // un acorde suena entero
+}
+
+/**
+ * Recorre el modelo gráfico de OSMD y anota dónde quedó dibujada cada nota.
+ *
+ * OSMD dibuja en SVG sin dejar las alturas en el DOM, así que no hay forma de
+ * saber qué nota hay bajo el cursor mirando el elemento pulsado. El modelo
+ * gráfico sí guarda, para cada cabeza, su posición y la nota de origen: con eso
+ * se construye un índice y se busca la más cercana al clic.
+ *
+ * Las posiciones van en unidades de OSMD —10 por espacio de pentagrama— y no en
+ * píxeles, para que sigan valiendo al cambiar el zoom.
+ */
+function indexarNotas(osmd: OSMDType): NotaPulsable[] {
+  const fuera: NotaPulsable[] = [];
+  const hoja = (osmd as any).GraphicSheet;
+  for (const fila of hoja?.MeasureList ?? []) {
+    for (const compas of fila ?? []) {
+      for (const entrada of compas?.staffEntries ?? []) {
+        for (const voz of entrada?.graphicalVoiceEntries ?? []) {
+          const midis: number[] = [];
+          let x = 0, y = 0, n = 0;
+          for (const gn of voz?.notes ?? []) {
+            const ht = gn?.sourceNote?.Pitch?.halfTone;
+            if (typeof ht !== 'number') continue;   // silencio o nota sin altura
+            midis.push(ht + 12);                    // OSMD cuenta desde Do-1
+            const p = gn.PositionAndShape?.AbsolutePosition;
+            if (p) { x += p.x; y += p.y; n++; }
+          }
+          if (midis.length && n) fuera.push({ ux: x / n, uy: y / n, midis });
+        }
+      }
+    }
+  }
+  return fuera;
+}
+
 /**
  * Graba la partitura con OpenSheetMusicDisplay a partir del MusicXML.
  *
@@ -39,8 +82,44 @@ export const ScoreRenderer: React.FC<ScoreRendererProps> = ({
 }) => {
   const hostRef = useRef<HTMLDivElement>(null);
   const osmdRef = useRef<OSMDType | null>(null);
+  const notasRef = useRef<NotaPulsable[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+
+  /**
+   * Toca la nota más cercana al clic, en cualquiera de los dos pentagramas.
+   *
+   * StaffSVG permitía pulsar una nota para oírla; al pasar al grabado de OSMD
+   * esa función se quedó por el camino, y con dos pentagramas se nota
+   * especialmente: la mano izquierda parecía muda.
+   */
+  const alPulsar = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const osmd = osmdRef.current;
+    const host = hostRef.current;
+    if (!osmd || !host || !notasRef.current.length) return;
+
+    const svg = host.querySelector('svg');
+    if (!svg) return;
+    const r = svg.getBoundingClientRect();
+
+    // 10 unidades de OSMD por espacio de pentagrama, escaladas por el zoom
+    const escala = 10 * ((osmd as any).zoom ?? 1);
+    const ux = (e.clientX - r.left) / escala;
+    const uy = (e.clientY - r.top) / escala;
+
+    let mejor: NotaPulsable | null = null;
+    let mejorD = Infinity;
+    for (const n of notasRef.current) {
+      // El eje vertical pesa más: en un pentagrama las notas se apilan cerca
+      // en altura, y una fallo de línea es peor que uno de tiempo.
+      const d = (n.ux - ux) ** 2 + ((n.uy - uy) * 1.6) ** 2;
+      if (d < mejorD) { mejorD = d; mejor = n; }
+    }
+    // Radio de tolerancia en unidades: más allá, el clic fue al papel
+    if (mejor && mejorD < 36) {
+      for (const m of mejor.midis) playMidi(m, 0.7, 82);
+    }
+  }, []);
 
   const isDark = theme === 'dark';
 
@@ -76,6 +155,7 @@ export const ScoreRenderer: React.FC<ScoreRendererProps> = ({
         if (cancelled) return;
         osmd.zoom = zoom / 100;
         osmd.render();
+        notasRef.current = indexarNotas(osmd);
         setLoading(false);
         onReady?.(osmd.Sheet?.SourceMeasures?.length ?? 0);
       })
@@ -103,6 +183,8 @@ export const ScoreRenderer: React.FC<ScoreRendererProps> = ({
     try {
       osmd.zoom = zoom / 100;
       osmd.render();
+      // El zoom mueve todo: hay que rehacer el índice de posiciones
+      notasRef.current = indexarNotas(osmd);
     } catch {
       /* redibujado durante una descarga en curso */
     }
@@ -146,7 +228,12 @@ export const ScoreRenderer: React.FC<ScoreRendererProps> = ({
           Grabando partitura...
         </div>
       )}
-      <div ref={hostRef} className="w-full overflow-x-auto" />
+      <div
+        ref={hostRef}
+        onClick={alPulsar}
+        className="w-full overflow-x-auto cursor-pointer"
+        title="Pulsa una nota para oírla"
+      />
     </div>
   );
 };
