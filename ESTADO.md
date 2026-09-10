@@ -23,11 +23,14 @@ falla; el mensaje de error ahora lo dice explícitamente.
 
 ```
 IMAGEN → Node:3001 → Audiveris → MXL → parse_mxl.py → notation.py → notas + MusicXML
-AUDIO  → Py:3002   → MR-MT3 → MIDI → notation.py    → notas + MusicXML + voces
+AUDIO  → Py:3002   → cola → CNN → MIDI → notation.py → notas + MusicXML + voces
 ```
 
 Ambas rutas comparten `backend-py/notation.py`, que es donde vive la conversión
 de transcripción a partitura legible.
+
+El audio pasa por una cola de trabajos: la petición devuelve un identificador al
+instante y el trabajo ocurre aparte. Ver la sección de despliegue.
 
 ---
 
@@ -244,6 +247,40 @@ el servicio responde.
 Verificado: 820 MB de RAM en total, listo a los 12 s de arrancar, 30 s de audio
 transcritos en 27.4 s.
 
+#### Cola de trabajos
+
+Sin cola, las peticiones simultáneas se reparten los mismos núcleos y **ninguna
+termina antes**. Medido con audio de 15 s por petición:
+
+| simultáneas | total | espera de cada una |
+|---|---|---|
+| 1 | 18.8 s | 1.00× |
+| 2 | 33.0 s | 1.76× |
+| 3 | 46.7 s | 2.49× |
+
+Con tres a la vez, las tres esperaban 46.7 s. Con cola, el primero espera 21.8 s
+—**2.1× más rápido**— y los demás saben cuánto les falta: #2 a los 34.1 s, #3 a
+los 46.4 s.
+
+El motivo decisivo es otro, sin embargo: **nginx corta las peticiones a los 60 s
+por defecto**. Una transcripción larga muere ahí por muy bien que funcione el
+backend. Con cola, toda petición HTTP dura milisegundos.
+
+```
+POST   /api/jobs/transcribe   encola y devuelve jobId al instante
+GET    /api/jobs/{id}         estado, posición, avance o resultado
+DELETE /api/jobs/{id}         cancela lo que aún no empezó
+GET    /api/jobs              estadísticas de la cola
+```
+
+Un solo trabajador, a propósito: el trabajo ya usa los 8 hilos de torch por
+dentro, así que dos en paralelo solo competirían. Tope de 20 en espera; por
+encima responde 503 en vez de arrastrarse.
+
+En memoria y sin Redis, también a propósito: para una sola máquina, Redis es
+infraestructura que mantener a cambio de nada. Si algún día hay varias, ahí sí
+toca. El precio es perder lo que hubiera en curso al reiniciar.
+
 #### El compromiso, dicho claro
 
 El CNN está entrenado con piano: interpreta como piano lo que oiga. Para piano
@@ -335,5 +372,16 @@ curl http://localhost:3002/api/health
 curl http://localhost:3001/api/health
 ```
 
-`health` del backend Python expone `mt3Loaded`: en `false` la primera
-transcripción tardará ~60 s extra mientras carga el checkpoint.
+`health` del backend Python expone `cnnLoaded` (motor por defecto, listo a los
+~12 s de arrancar) y `queue` con el estado de la cola. `mt3Loaded` en `false` es
+normal: MT3 solo se carga si alguien lo pide.
+
+### Nota para nginx
+
+La cola hace que ninguna petición dure más de un instante, así que el
+`proxy_read_timeout` por defecto ya no estorba. Pero conviene subir el tamaño
+máximo de subida, que por defecto es 1 MB:
+
+```nginx
+client_max_body_size 32m;
+```
