@@ -8,6 +8,7 @@ interface ScoreImporterProps {
     notes: ImportedNote[], voice?: string, keySig?: KeySignature,
     timeSig?: string, musicXml?: string | null,
     voices?: ScoreVoice[], tempo?: number,
+    titulo?: string, keyLabel?: string,
   ) => void;
   onClose: () => void;
 }
@@ -576,6 +577,10 @@ export const ScoreImporter: React.FC<ScoreImporterProps> = ({ onImport, onClose 
                 onImport(
                   notes, undefined, keySig ?? undefined, timeSig || undefined,
                   musicXml, allVoices, detectedTempo ?? undefined,
+                  // El nombre del archivo, sin extensión, es lo más cercano a
+                  // un título que tenemos: la partitura no lo trae
+                  fileName.replace(/\.[^.]+$/, ''),
+                  keyLabel || undefined,
                 );
                 onClose();
               }}

@@ -37,6 +37,8 @@ export const Editor: React.FC = () => {
   const [musicXml, setMusicXml] = useState<string | undefined>(undefined);
   const [voices, setVoices] = useState<ScoreVoice[] | undefined>(undefined);
   const [tempo, setTempo] = useState(120);
+  const [scoreTitle, setScoreTitle] = useState<string>('');
+  const [importedKeyLabel, setImportedKeyLabel] = useState<string>('');
   // Con MusicXML se graba con OSMD; sin él queda el dibujo propio de StaffSVG
   const [useEngraver, setUseEngraver] = useState(true);
 
@@ -59,12 +61,15 @@ export const Editor: React.FC = () => {
     raw: ImportedNote[], _voice?: string, keySig?: KeySignature,
     timeSig?: string, xml?: string | null,
     allVoices?: ScoreVoice[], detectedTempo?: number,
+    titulo?: string, keyLabel?: string,
   ) => {
     if (keySig)  setImportedKeySig(keySig);
     if (timeSig) setImportedTimeSig(timeSig);
     setMusicXml(xml ?? undefined);
     setVoices(allVoices);
     if (detectedTempo) setTempo(detectedTempo);
+    setScoreTitle(titulo ?? '');
+    setImportedKeyLabel(keyLabel ?? '');
     const asNoteData: NoteData[] = raw.map((n, i) => ({
       id: `imported-${i}`,
       pitch: n.pitch,
@@ -341,18 +346,44 @@ export const Editor: React.FC = () => {
               }`}
               style={{ transform: `scale(${zoomLevel / 100})`, transformOrigin: 'top center' }}
             >
-              {/* Score Header */}
+              {/* Cabecera. Con una partitura importada muestra lo que se detectó
+                  de ELLA; el encabezado de Mozart es solo del ejemplo de inicio
+                  y dejarlo puesto encima de otra obra confunde de verdad. */}
               <div className="text-center mb-8 w-full">
-                <h1 className="font-serif text-[32px] sm:text-[36px] font-bold tracking-tight text-current">
-                  Sonata facile en Do Mayor, K. 545
-                </h1>
-                <p className="text-sm text-slate-500 italic mt-1">
-                  Allegro — Revisión de Edición Urtext
-                </p>
-                <div className="flex items-center justify-between text-xs mt-3 pt-2 border-t border-current/10 opacity-70">
-                  <span className="font-semibold text-[#C8A84B]">Allegro (♩ = 120)</span>
-                  <span className="font-serif italic">Wolfgang Amadeus Mozart</span>
-                </div>
+                {importedNotes ? (
+                  <>
+                    <h1 className="font-serif text-[28px] sm:text-[32px] font-bold tracking-tight text-current">
+                      {scoreTitle || 'Partitura importada'}
+                    </h1>
+                    <p className="text-sm text-slate-500 italic mt-1">
+                      Transcripción automática — revisa antes de dar por buena
+                    </p>
+                    <div className="flex items-center justify-between text-xs mt-3 pt-2 border-t border-current/10 opacity-70 gap-3 flex-wrap">
+                      <span className="font-semibold text-[#C8A84B]">
+                        {importedTimeSig ?? '4/4'}
+                        {importedKeyLabel ? ` · ${importedKeyLabel}` : ''}
+                        {` · ♩ = ${tempo}`}
+                      </span>
+                      <span className="font-mono text-[11px] opacity-80">
+                        {importedNotes.length} eventos
+                        {voices?.length ? ` · ${voices.length} voces` : ''}
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <h1 className="font-serif text-[32px] sm:text-[36px] font-bold tracking-tight text-current">
+                      Sonata facile en Do Mayor, K. 545
+                    </h1>
+                    <p className="text-sm text-slate-500 italic mt-1">
+                      Allegro — Revisión de Edición Urtext
+                    </p>
+                    <div className="flex items-center justify-between text-xs mt-3 pt-2 border-t border-current/10 opacity-70">
+                      <span className="font-semibold text-[#C8A84B]">Allegro (♩ = 120)</span>
+                      <span className="font-serif italic">Wolfgang Amadeus Mozart</span>
+                    </div>
+                  </>
+                )}
               </div>
 
               {/* Staff Systems — grabado con OSMD si hay MusicXML, si no el dibujo propio */}
